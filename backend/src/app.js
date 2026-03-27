@@ -11,20 +11,20 @@ const app = express();
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin) {
-        callback(null, true);
-        return;
+      // allow non-browser requests
+      if (!origin) return callback(null, true);
+
+      const allowedOrigins = [
+        env.frontendOrigin,
+        "http://localhost:5173"
+      ];
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
       }
 
-      const isConfiguredOrigin = origin === env.frontendOrigin;
-      const isLocalhostDevOrigin = /^http:\/\/localhost:\d+$/.test(origin);
-
-      if (isConfiguredOrigin || isLocalhostDevOrigin) {
-        callback(null, true);
-        return;
-      }
-
-      callback(new Error("Not allowed by CORS"));
+      console.log("❌ Blocked by CORS:", origin); // debug
+      return callback(null, false); // ✅ DON'T throw error
     }
   })
 );
