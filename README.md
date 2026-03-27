@@ -118,4 +118,5 @@ Response:
 ## Notes
 
 - Web Speech API support depends on browser capabilities (best in Chromium browsers).
+- If Aura does not behave correctly in your current browser, switch to a different browser and test again.
 - Session history currently uses in-memory storage. Use Redis or a database for production.
