@@ -5,6 +5,35 @@ import { useSpeechToText } from "./hooks/useSpeechToText";
 import { useTextToSpeech } from "./hooks/useTextToSpeech";
 import { AgentAudioVisualizerAura } from "./components/agent-audio-visualizer-aura";
 
+const normalizeTranscriptWords = (input) => {
+  const words = input
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter(Boolean);
+
+  const normalized = [];
+  let repeatCount = 0;
+  let previous = "";
+
+  for (const word of words) {
+    const lowered = word.toLowerCase();
+
+    if (lowered === previous) {
+      repeatCount += 1;
+      if (repeatCount > 2) {
+        continue;
+      }
+    } else {
+      previous = lowered;
+      repeatCount = 1;
+    }
+
+    normalized.push(word);
+  }
+
+  return normalized;
+};
+
 const App = () => {
   const [isLoaded, setIsLoaded] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
@@ -142,14 +171,9 @@ const App = () => {
   }, [fullTranscript, textFallback]);
 
   const transcriptWords = useMemo(() => {
-    const source = transcript.trim() || userText.trim();
-    return source ? source.split(/\s+/) : [];
-  }, [transcript, userText]);
-
-  const interimWords = useMemo(() => {
-    const source = interimTranscript.trim();
-    return source ? source.split(/\s+/) : [];
-  }, [interimTranscript]);
+    const source = `${transcript} ${interimTranscript}`.trim();
+    return source ? normalizeTranscriptWords(source) : [];
+  }, [transcript, interimTranscript]);
 
   const stopEverything = () => {
     if (requestAbortRef.current) {
@@ -172,6 +196,7 @@ const App = () => {
       return;
     }
 
+  resetTranscript();
     setUserText(message);
     isSendingRef.current = true;
     setStatus("thinking");
@@ -202,6 +227,7 @@ const App = () => {
 
       if (speechError !== "network" && isSupported) {
         resetTranscript();
+        setUserText("");
         startListening();
         setStatus("listening");
       } else {
@@ -245,6 +271,7 @@ const App = () => {
   const toggleConversation = async () => {
     if (status === "idle" || status === "error") {
       resetTranscript();
+      setUserText("");
       setApiError("");
       setStatus("listening");
       startListening();
@@ -257,15 +284,16 @@ const App = () => {
     }
 
     if (status === "thinking" || status === "speaking") {
-      stopEverything();
       return;
     }
 
     stopEverything();
   };
 
-  const showStopState = status === "listening" || status === "thinking" || status === "speaking";
-  const mainButtonLabel = status === "listening" ? "Stop and Send" : "Stop Aura";
+  const isListeningState = status === "listening";
+  const isBusyState = status === "thinking" || status === "speaking";
+  const showStopState = isListeningState;
+  const mainButtonLabel = isListeningState ? "Stop and Send" : isBusyState ? "Aura Working..." : "Talk with Aura";
 
   const friendlySpeechError = useMemo(() => {
     if (!speechError) {
@@ -426,7 +454,7 @@ const App = () => {
           >
             Read Docs
           </button>
-          <a href="#">GitHub</a>
+          <a href="https://github.com/Anandkanil/aura" target="_blank" rel="noopener noreferrer">GitHub</a>
         </div>
       </header>
 
@@ -439,7 +467,7 @@ const App = () => {
 
         <div className="conversation-box">
           {status === "listening" && <p className="listening-indicator">&quot;Listening...&quot;</p>}
-          {(transcriptWords.length > 0 || interimWords.length > 0) && (
+          {transcriptWords.length > 0 && (
             <div className="transcript-stack">
               <p className="user-line transcript-animated">
                 <span>You:</span>{" "}
@@ -448,15 +476,6 @@ const App = () => {
                     {word}
                   </span>
                 ))}
-                {interimWords.length > 0 && (
-                  <span className="interim-chunk">
-                    {interimWords.map((word, index) => (
-                      <span key={`interim-word-${index}`} className="transcript-word interim-word" style={{ animationDelay: `${index * 32}ms` }}>
-                        {word}
-                      </span>
-                    ))}
-                  </span>
-                )}
               </p>
               <p className="transcript-caption">{isListening ? "Live transcription" : "Captured transcript"}</p>
             </div>
@@ -477,14 +496,18 @@ const App = () => {
         </section>
 
         <div className="action-row">
-          <button className={`main-button ${showStopState ? "listening" : ""}`} onClick={toggleConversation} disabled={!isSupported && status === "idle"}>
+          <button
+            className={`main-button ${isListeningState ? "listening" : ""}`}
+            onClick={toggleConversation}
+            disabled={(!isSupported && status === "idle") || isBusyState}
+          >
             {showStopState ? (
               <>
                 <Square size={14} fill="currentColor" /> {mainButtonLabel}
               </>
             ) : (
               <>
-                <Mic size={14} /> Talk with Aura
+                <Mic size={14} /> {mainButtonLabel}
               </>
             )}
             <span className="divider" />

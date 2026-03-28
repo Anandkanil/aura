@@ -19,6 +19,7 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
   const pendingStopResolverRef = useRef(null);
   const transcriptRef = useRef("");
   const interimTranscriptRef = useRef("");
+  const finalSegmentsRef = useRef([]);
 
   const [isSupported, setIsSupported] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -86,24 +87,22 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
     recognition.onresult = (event) => {
       resetSilenceTimer();
 
-      let finalChunk = "";
       let interimChunk = "";
 
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const chunk = event.results[i][0].transcript;
+        const chunk = event.results[i][0].transcript.trim();
 
         if (event.results[i].isFinal) {
-          finalChunk += chunk;
+          finalSegmentsRef.current[i] = chunk;
         } else {
-          interimChunk += chunk;
+          interimChunk = `${interimChunk} ${chunk}`.trim();
         }
       }
 
-      if (finalChunk) {
-        setTranscript((previous) => `${previous} ${finalChunk}`.trim());
-      }
+      const finalText = finalSegmentsRef.current.filter(Boolean).join(" ").trim();
+      setTranscript(finalText);
 
-      setInterimTranscript(interimChunk.trim());
+      setInterimTranscript(interimChunk);
     };
 
     recognition.onerror = (event) => {
@@ -253,6 +252,7 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
     setInterimTranscript("");
     transcriptRef.current = "";
     interimTranscriptRef.current = "";
+    finalSegmentsRef.current = [];
   }, []);
 
   const getTranscript = useCallback(() => {
