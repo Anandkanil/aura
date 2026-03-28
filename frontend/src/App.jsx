@@ -175,6 +175,12 @@ const App = () => {
   }, [isListening, status]);
 
   useEffect(() => {
+    if (!isListening && status === "listening") {
+      setStatus("idle");
+    }
+  }, [isListening, status]);
+
+  useEffect(() => {
     return () => {
       toastTimeoutsRef.current.forEach((timeoutId) => {
         clearTimeout(timeoutId);

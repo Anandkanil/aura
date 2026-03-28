@@ -1,11 +1,81 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+const SILENCE_TIMEOUT_MS = 3000;
+const RESTART_DELAY_MS = 140;
+const STOP_RESOLVE_DEBOUNCE_MS = 180;
+const RESTART_WINDOW_MS = 10000;
+const MAX_RESTARTS_IN_WINDOW = 12;
+
 const getSpeechRecognition = () => {
   if (typeof window === "undefined") {
     return null;
   }
 
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+};
+
+const normalizeText = (text) => text.trim().replace(/\s+/g, " ");
+
+const mergeTranscript = (existingText, incomingText) => {
+  const existing = normalizeText(existingText || "");
+  const incoming = normalizeText(incomingText || "");
+
+  if (!incoming) {
+    return existing;
+  }
+
+  if (!existing) {
+    return incoming;
+  }
+
+  const existingWords = existing.split(" ");
+  const incomingWords = incoming.split(" ");
+  const maxOverlap = Math.min(8, existingWords.length, incomingWords.length);
+
+  let overlap = 0;
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    const existingSuffix = existingWords.slice(existingWords.length - size).join(" ").toLowerCase();
+    const incomingPrefix = incomingWords.slice(0, size).join(" ").toLowerCase();
+
+    if (existingSuffix === incomingPrefix) {
+      overlap = size;
+      break;
+    }
+  }
+
+  if (overlap === incomingWords.length) {
+    return existing;
+  }
+
+  return [...existingWords, ...incomingWords.slice(overlap)].join(" ");
+};
+
+const cleanTranscript = (text) => {
+  const normalized = normalizeText(text || "");
+  if (!normalized) {
+    return "";
+  }
+
+  const words = normalized.split(" ");
+  const deduplicated = [];
+  let lastWord = "";
+  let repeatCount = 0;
+
+  for (const word of words) {
+    if (word.toLowerCase() === lastWord.toLowerCase()) {
+      repeatCount += 1;
+      if (repeatCount > 2) {
+        continue;
+      }
+    } else {
+      lastWord = word;
+      repeatCount = 0;
+    }
+
+    deduplicated.push(word);
+  }
+
+  return deduplicated.join(" ");
 };
 
 /**
@@ -38,16 +108,16 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
   const isListeningRef = useRef(false);
   const shouldKeepListeningRef = useRef(false);
   const isStartingRef = useRef(false);
+  const manualStopRef = useRef(false);
   const restartTimerRef = useRef(null);
-  const silenceTimerRef = useRef(null);
-  const timedOutBySilenceRef = useRef(false);
+  const resolveTimerRef = useRef(null);
+  const lastSpeechTimeRef = useRef(0);
+  const restartWindowStartRef = useRef(0);
+  const restartAttemptsRef = useRef(0);
   const pendingStopResolverRef = useRef(null);
   const transcriptRef = useRef("");
   const interimTranscriptRef = useRef("");
-  const finalSegmentsRef = useRef([]);
   const isMobileRef = useRef(detectMobileDevice());
-  const lastFinalIndexRef = useRef(-1);
-  const finalTextDebounceRef = useRef(null);
 
   const [isSupported, setIsSupported] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -55,26 +125,19 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
   const [interimTranscript, setInterimTranscript] = useState("");
   const [error, setError] = useState("");
 
-  const clearSilenceTimer = useCallback(() => {
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
+  const clearRestartTimer = useCallback(() => {
+    if (restartTimerRef.current) {
+      clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
     }
   }, []);
 
-  const resetSilenceTimer = useCallback(() => {
-    clearSilenceTimer();
-
-    silenceTimerRef.current = setTimeout(() => {
-      if (!recognitionRef.current || !isListeningRef.current) {
-        return;
-      }
-
-      timedOutBySilenceRef.current = true;
-      shouldKeepListeningRef.current = false;
-      recognitionRef.current.stop();
-    }, 5000);
-  }, [clearSilenceTimer]);
+  const clearResolveTimer = useCallback(() => {
+    if (resolveTimerRef.current) {
+      clearTimeout(resolveTimerRef.current);
+      resolveTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     transcriptRef.current = transcript;
@@ -85,8 +148,8 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
   }, [interimTranscript]);
 
   const finalText = useMemo(() => {
-    return `${transcript} ${interimTranscript}`.trim();
-  }, [transcript, interimTranscript]);
+    return transcript;
+  }, [transcript]);
 
   useEffect(() => {
     const SpeechRecognition = getSpeechRecognition();
@@ -100,65 +163,57 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
 
     const recognition = new SpeechRecognition();
     recognition.lang = lang;
-    // On mobile: disable continuous mode for stability, reduce interim results
+    // Mobile browsers are more stable with non-continuous sessions that we manually restart.
     recognition.continuous = isMobileRef.current ? false : continuous;
-    recognition.interimResults = isMobileRef.current ? false : interimResults;
+    // Final-only transcript handling keeps backend input clean and predictable.
+    recognition.interimResults = false;
 
     recognition.onstart = () => {
-      timedOutBySilenceRef.current = false;
+      console.log("[speech] recognition started");
       isStartingRef.current = false;
       isListeningRef.current = true;
       setIsListening(true);
       setError("");
-      resetSilenceTimer();
-      lastFinalIndexRef.current = -1;
+
+      if (!lastSpeechTimeRef.current) {
+        lastSpeechTimeRef.current = Date.now();
+      }
     };
 
     recognition.onresult = (event) => {
-      resetSilenceTimer();
-
-      let interimChunk = "";
-      let hasNewFinalText = false;
+      let nextTranscript = transcriptRef.current;
+      let hasFinalResult = false;
 
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const chunk = event.results[i][0].transcript.trim();
-
-        if (!chunk) continue;
-
-        if (event.results[i].isFinal) {
-          // Only process final results we haven't seen before
-          if (i > lastFinalIndexRef.current) {
-            finalSegmentsRef.current[i] = chunk;
-            lastFinalIndexRef.current = i;
-            hasNewFinalText = true;
-          }
-        } else {
-          // On mobile, skip interim results
-          if (!isMobileRef.current) {
-            interimChunk = `${interimChunk} ${chunk}`.trim();
-          }
+        if (!event.results[i].isFinal) {
+          continue;
         }
+
+        const chunk = normalizeText(event.results[i][0].transcript || "");
+        if (!chunk) {
+          continue;
+        }
+
+        hasFinalResult = true;
+        nextTranscript = mergeTranscript(nextTranscript, chunk);
+        lastSpeechTimeRef.current = Date.now();
       }
 
-      // Rebuild final text from stored segments (avoids duplicates)
-      const finalText = finalSegmentsRef.current
-        .filter(Boolean)
-        .join(" ")
-        .trim();
-      
-      setTranscript(finalText);
-
-      // Only update interim if not on mobile
-      if (!isMobileRef.current) {
-        setInterimTranscript(interimChunk);
+      if (hasFinalResult) {
+        const clean = cleanTranscript(nextTranscript);
+        transcriptRef.current = clean;
+        setTranscript(clean);
+        setInterimTranscript("");
+        interimTranscriptRef.current = "";
+        console.log("[speech] final segment captured");
       }
     };
 
     recognition.onerror = (event) => {
-      clearSilenceTimer();
-      
+      console.log("[speech] recognition error", event.error);
+
       let friendlyError = event.error || "Speech recognition error";
-      
+
       // Provide mobile-specific error messages
       if (isMobileRef.current) {
         if (event.error === "network") {
@@ -171,7 +226,7 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
           friendlyError = "No speech detected. Please try again.";
         }
       }
-      
+
       setError(friendlyError);
 
       const fatalErrors = new Set([
@@ -186,54 +241,79 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
         shouldKeepListeningRef.current = false;
         isListeningRef.current = false;
         isStartingRef.current = false;
-        if (restartTimerRef.current) {
-          clearTimeout(restartTimerRef.current);
-          restartTimerRef.current = null;
-        }
+        clearRestartTimer();
+        clearResolveTimer();
         setIsListening(false);
       }
     };
 
     recognition.onend = () => {
-      clearSilenceTimer();
-      isStartingRef.current = false;
-      setInterimTranscript("");
+      console.log("[speech] recognition ended");
 
-      if (timedOutBySilenceRef.current) {
-        setError("No speech detected for 5 seconds. Listening stopped.");
-        timedOutBySilenceRef.current = false;
-      }
+      isStartingRef.current = false;
+      isListeningRef.current = false;
+      setIsListening(false);
+      setInterimTranscript("");
+      interimTranscriptRef.current = "";
 
       if (pendingStopResolverRef.current) {
         const resolveStop = pendingStopResolverRef.current;
         pendingStopResolverRef.current = null;
-        // Return clean, trimmed transcript
-        const cleanTranscript = `${transcriptRef.current} ${interimTranscriptRef.current}`
-          .trim()
-          .replace(/\s+/g, " ");
-        resolveStop(cleanTranscript);
+
+        clearResolveTimer();
+        resolveTimerRef.current = setTimeout(() => {
+          const clean = cleanTranscript(transcriptRef.current);
+          console.log("[speech] manual stop resolved");
+          resolveStop(clean);
+        }, STOP_RESOLVE_DEBOUNCE_MS);
       }
 
       if (shouldKeepListeningRef.current) {
-        setIsListening(true);
+        const silenceMs = Date.now() - lastSpeechTimeRef.current;
+
+        if (silenceMs > SILENCE_TIMEOUT_MS) {
+          shouldKeepListeningRef.current = false;
+          setError("No speech detected for more than 3 seconds. Listening stopped.");
+          console.log("[speech] silence timeout reached, stopping");
+          return;
+        }
+
+        const now = Date.now();
+        if (!restartWindowStartRef.current || now - restartWindowStartRef.current > RESTART_WINDOW_MS) {
+          restartWindowStartRef.current = now;
+          restartAttemptsRef.current = 0;
+        }
+
+        restartAttemptsRef.current += 1;
+        if (restartAttemptsRef.current > MAX_RESTARTS_IN_WINDOW) {
+          shouldKeepListeningRef.current = false;
+          setError("Speech recognition is unstable right now. Please tap to retry.");
+          console.log("[speech] restart guard tripped, stopping");
+          return;
+        }
+
+        clearRestartTimer();
         restartTimerRef.current = setTimeout(() => {
-          if (!recognitionRef.current || isStartingRef.current || isListeningRef.current) {
+          if (
+            !recognitionRef.current ||
+            isStartingRef.current ||
+            isListeningRef.current ||
+            !shouldKeepListeningRef.current
+          ) {
             return;
           }
 
           try {
             isStartingRef.current = true;
+            console.log("[speech] restarting recognition after short pause");
             recognitionRef.current.start();
           } catch (restartError) {
             isStartingRef.current = false;
             setError(restartError.message || "Could not restart listening");
           }
-        }, 150);
+        }, RESTART_DELAY_MS);
         return;
       }
-
-      isListeningRef.current = false;
-      setIsListening(false);
     };
 
     recognitionRef.current = recognition;
@@ -242,21 +322,14 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
       shouldKeepListeningRef.current = false;
       isListeningRef.current = false;
       isStartingRef.current = false;
-      timedOutBySilenceRef.current = false;
-      if (restartTimerRef.current) {
-        clearTimeout(restartTimerRef.current);
-        restartTimerRef.current = null;
-      }
-      if (finalTextDebounceRef.current) {
-        clearTimeout(finalTextDebounceRef.current);
-        finalTextDebounceRef.current = null;
-      }
-      clearSilenceTimer();
+      manualStopRef.current = false;
+      clearRestartTimer();
+      clearResolveTimer();
       pendingStopResolverRef.current = null;
       recognition.abort();
       recognitionRef.current = null;
     };
-  }, [lang, continuous, interimResults, clearSilenceTimer, resetSilenceTimer]);
+  }, [lang, continuous, interimResults, clearRestartTimer, clearResolveTimer]);
 
   const startListening = useCallback(() => {
     if (!recognitionRef.current || isListeningRef.current || isStartingRef.current) {
@@ -264,7 +337,14 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
     }
 
     try {
+      console.log("[speech] manual start requested");
+      clearRestartTimer();
+      clearResolveTimer();
       shouldKeepListeningRef.current = true;
+      manualStopRef.current = false;
+      restartWindowStartRef.current = Date.now();
+      restartAttemptsRef.current = 0;
+      lastSpeechTimeRef.current = Date.now();
       isStartingRef.current = true;
       recognitionRef.current.start();
     } catch (startError) {
@@ -272,19 +352,17 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
       isStartingRef.current = false;
       setError(startError.message || "Could not start listening");
     }
-  }, []);
+  }, [clearRestartTimer, clearResolveTimer]);
 
   const stopListening = useCallback(() => {
+    console.log("[speech] manual stop requested");
     shouldKeepListeningRef.current = false;
-    timedOutBySilenceRef.current = false;
-    clearSilenceTimer();
-
-    if (restartTimerRef.current) {
-      clearTimeout(restartTimerRef.current);
-      restartTimerRef.current = null;
-    }
+    manualStopRef.current = true;
+    clearRestartTimer();
 
     if (!recognitionRef.current) {
+      isListeningRef.current = false;
+      isStartingRef.current = false;
       setIsListening(false);
       return;
     }
@@ -294,14 +372,15 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
     } else {
       setIsListening(false);
     }
-  }, []);
+  }, [clearRestartTimer]);
 
   const stopListeningAndGetTranscript = useCallback(() => {
     return new Promise((resolve) => {
-      const snapshot = `${transcriptRef.current} ${interimTranscriptRef.current}`.trim();
+      const snapshot = cleanTranscript(transcriptRef.current);
 
       if (!recognitionRef.current || (!isListeningRef.current && !isStartingRef.current)) {
         shouldKeepListeningRef.current = false;
+        manualStopRef.current = true;
         setIsListening(false);
         resolve(snapshot);
         return;
@@ -325,12 +404,11 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
     setInterimTranscript("");
     transcriptRef.current = "";
     interimTranscriptRef.current = "";
-    finalSegmentsRef.current = [];
-    lastFinalIndexRef.current = -1;
+    lastSpeechTimeRef.current = Date.now();
   }, []);
 
   const getTranscript = useCallback(() => {
-    return `${transcriptRef.current} ${interimTranscriptRef.current}`.trim();
+    return cleanTranscript(transcriptRef.current);
   }, []);
 
   return {
