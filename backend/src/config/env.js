@@ -9,7 +9,7 @@ const toInt = (value, fallback) => {
 
 export const env = {
   port: toInt(process.env.PORT, 4000),
-  frontendOrigin: process.env.FRONTEND_ORIGIN || "http://localhost:5173",
+  frontendOrigin: process.env.FRONTEND_ORIGIN ,
   huggingFaceApiKey: process.env.HUGGINGFACE_API_KEY || "",
   huggingFaceModel: process.env.HUGGINGFACE_MODEL || "Qwen/Qwen2.5-7B-Instruct",
   huggingFaceBaseUrl: process.env.HUGGINGFACE_BASE_URL || "https://router.huggingface.co/v1/chat/completions",
