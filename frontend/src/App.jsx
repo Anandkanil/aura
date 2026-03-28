@@ -112,6 +112,7 @@ const App = () => {
   const {
     isSupported: isTtsSupported,
     isSpeaking,
+    isSpeakingRef,
     error: ttsError,
     speak,
     cancel
@@ -179,6 +180,17 @@ const App = () => {
       setStatus("idle");
     }
   }, [isListening, status]);
+
+  useEffect(() => {
+    if (isSpeaking && status !== "speaking") {
+      setStatus("speaking");
+      return;
+    }
+
+    if (!isSpeaking && status === "speaking") {
+      setStatus(isListening ? "listening" : "idle");
+    }
+  }, [isSpeaking, isListening, status]);
 
   useEffect(() => {
     return () => {
@@ -320,6 +332,17 @@ const App = () => {
   };
 
   const toggleConversation = async () => {
+    if (status === "speaking") {
+      // Allow barge-in: tapping mic interrupts TTS and immediately reopens listening.
+      cancel();
+      resetTranscript();
+      setUserText("");
+      setApiError("");
+      setStatus("listening");
+      startListening();
+      return;
+    }
+
     if (status === "idle" || status === "error") {
       resetTranscript();
       setUserText("");
@@ -334,7 +357,7 @@ const App = () => {
       return;
     }
 
-    if (status === "thinking" || status === "speaking") {
+    if (status === "thinking") {
       return;
     }
 
@@ -342,9 +365,31 @@ const App = () => {
   };
 
   const isListeningState = status === "listening";
-  const isBusyState = status === "thinking" || status === "speaking";
+  const isBusyState = status === "thinking";
+  const isInterruptableSpeaking = status === "speaking";
   const showStopState = isListeningState;
-  const mainButtonLabel = isListeningState ? "Stop and Send" : isBusyState ? "Aura Working..." : "Talk with Aura";
+  const mainButtonLabel = isListeningState
+    ? "Stop and Send"
+    : isInterruptableSpeaking
+      ? "Tap to Interrupt"
+      : isBusyState
+        ? "Aura Working..."
+        : "Talk with Aura";
+
+  useEffect(() => {
+    // If speech input appears while TTS is active, interrupt playback immediately.
+    if (!isSpeakingRef.current) {
+      return;
+    }
+
+    const spokenInput = `${transcript} ${interimTranscript}`.trim();
+    if (!spokenInput) {
+      return;
+    }
+
+    cancel();
+    setStatus("listening");
+  }, [transcript, interimTranscript, cancel, isSpeakingRef]);
 
   const friendlySpeechError = useMemo(() => {
     if (!speechError) {

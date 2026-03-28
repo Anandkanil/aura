@@ -12,6 +12,7 @@ export const useTextToSpeech = () => {
   const synthRef = useRef(null);
   const activeUtteranceRef = useRef(null);
   const activeSettleRef = useRef(null);
+  const isSpeakingRef = useRef(false);
 
   const [isSupported, setIsSupported] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -26,6 +27,7 @@ export const useTextToSpeech = () => {
       if (synthRef.current) {
         synthRef.current.cancel();
       }
+      isSpeakingRef.current = false;
     };
   }, []);
 
@@ -41,6 +43,7 @@ export const useTextToSpeech = () => {
 
     activeUtteranceRef.current = null;
     synthRef.current.cancel();
+    isSpeakingRef.current = false;
     setIsSpeaking(false);
   }, []);
 
@@ -68,6 +71,7 @@ export const useTextToSpeech = () => {
             activeSettleRef.current = null;
           }
 
+          isSpeakingRef.current = false;
           setIsSpeaking(false);
 
           if (!ok && errorMessage) {
@@ -83,6 +87,7 @@ export const useTextToSpeech = () => {
         activeSettleRef.current = settle;
 
         utterance.onstart = () => {
+          isSpeakingRef.current = true;
           setIsSpeaking(true);
           setError("");
         };
@@ -101,6 +106,7 @@ export const useTextToSpeech = () => {
       } catch (speakError) {
         activeSettleRef.current = null;
         activeUtteranceRef.current = null;
+        isSpeakingRef.current = false;
         setIsSpeaking(false);
         setError(speakError.message || "Speech synthesis failed");
         reject(speakError);
@@ -111,6 +117,7 @@ export const useTextToSpeech = () => {
   return {
     isSupported,
     isSpeaking,
+    isSpeakingRef,
     error,
     speak,
     cancel
