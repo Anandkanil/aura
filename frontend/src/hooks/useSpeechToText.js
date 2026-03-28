@@ -8,6 +8,31 @@ const getSpeechRecognition = () => {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
 };
 
+/**
+ * Detect if user is on a mobile device
+ * @returns {boolean} true if on mobile device
+ */
+const detectMobileDevice = () => {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const userAgent = navigator.userAgent.toLowerCase();
+  const isMobileUA = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/.test(userAgent);
+  const isTouchDevice = () => {
+    return (
+      (typeof window !== "undefined" &&
+        ("ontouchstart" in window ||
+          (window.DocumentTouch &&
+            typeof window.DocumentTouch === "function"))) ||
+      navigator.maxTouchPoints > 0 ||
+      navigator.msMaxTouchPoints > 0
+    );
+  };
+
+  return isMobileUA || isTouchDevice();
+};
+
 export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResults = true } = {}) => {
   const recognitionRef = useRef(null);
   const isListeningRef = useRef(false);
@@ -20,6 +45,9 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
   const transcriptRef = useRef("");
   const interimTranscriptRef = useRef("");
   const finalSegmentsRef = useRef([]);
+  const isMobileRef = useRef(detectMobileDevice());
+  const lastFinalIndexRef = useRef(-1);
+  const finalTextDebounceRef = useRef(null);
 
   const [isSupported, setIsSupported] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -72,8 +100,9 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
 
     const recognition = new SpeechRecognition();
     recognition.lang = lang;
-    recognition.continuous = continuous;
-    recognition.interimResults = interimResults;
+    // On mobile: disable continuous mode for stability, reduce interim results
+    recognition.continuous = isMobileRef.current ? false : continuous;
+    recognition.interimResults = isMobileRef.current ? false : interimResults;
 
     recognition.onstart = () => {
       timedOutBySilenceRef.current = false;
@@ -82,32 +111,68 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
       setIsListening(true);
       setError("");
       resetSilenceTimer();
+      lastFinalIndexRef.current = -1;
     };
 
     recognition.onresult = (event) => {
       resetSilenceTimer();
 
       let interimChunk = "";
+      let hasNewFinalText = false;
 
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const chunk = event.results[i][0].transcript.trim();
 
+        if (!chunk) continue;
+
         if (event.results[i].isFinal) {
-          finalSegmentsRef.current[i] = chunk;
+          // Only process final results we haven't seen before
+          if (i > lastFinalIndexRef.current) {
+            finalSegmentsRef.current[i] = chunk;
+            lastFinalIndexRef.current = i;
+            hasNewFinalText = true;
+          }
         } else {
-          interimChunk = `${interimChunk} ${chunk}`.trim();
+          // On mobile, skip interim results
+          if (!isMobileRef.current) {
+            interimChunk = `${interimChunk} ${chunk}`.trim();
+          }
         }
       }
 
-      const finalText = finalSegmentsRef.current.filter(Boolean).join(" ").trim();
+      // Rebuild final text from stored segments (avoids duplicates)
+      const finalText = finalSegmentsRef.current
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+      
       setTranscript(finalText);
 
-      setInterimTranscript(interimChunk);
+      // Only update interim if not on mobile
+      if (!isMobileRef.current) {
+        setInterimTranscript(interimChunk);
+      }
     };
 
     recognition.onerror = (event) => {
       clearSilenceTimer();
-      setError(event.error || "Speech recognition error");
+      
+      let friendlyError = event.error || "Speech recognition error";
+      
+      // Provide mobile-specific error messages
+      if (isMobileRef.current) {
+        if (event.error === "network") {
+          friendlyError = "Network error. Check your internet connection.";
+        } else if (event.error === "audio-capture") {
+          friendlyError = "Cannot access microphone. Check device permissions.";
+        } else if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          friendlyError = "Microphone permission denied.";
+        } else if (event.error === "no-speech") {
+          friendlyError = "No speech detected. Please try again.";
+        }
+      }
+      
+      setError(friendlyError);
 
       const fatalErrors = new Set([
         "not-allowed",
@@ -142,7 +207,11 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
       if (pendingStopResolverRef.current) {
         const resolveStop = pendingStopResolverRef.current;
         pendingStopResolverRef.current = null;
-        resolveStop(`${transcriptRef.current} ${interimTranscriptRef.current}`.trim());
+        // Return clean, trimmed transcript
+        const cleanTranscript = `${transcriptRef.current} ${interimTranscriptRef.current}`
+          .trim()
+          .replace(/\s+/g, " ");
+        resolveStop(cleanTranscript);
       }
 
       if (shouldKeepListeningRef.current) {
@@ -177,6 +246,10 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
       if (restartTimerRef.current) {
         clearTimeout(restartTimerRef.current);
         restartTimerRef.current = null;
+      }
+      if (finalTextDebounceRef.current) {
+        clearTimeout(finalTextDebounceRef.current);
+        finalTextDebounceRef.current = null;
       }
       clearSilenceTimer();
       pendingStopResolverRef.current = null;
@@ -253,6 +326,7 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
     transcriptRef.current = "";
     interimTranscriptRef.current = "";
     finalSegmentsRef.current = [];
+    lastFinalIndexRef.current = -1;
   }, []);
 
   const getTranscript = useCallback(() => {

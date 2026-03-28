@@ -5,6 +5,10 @@ import { useSpeechToText } from "./hooks/useSpeechToText";
 import { useTextToSpeech } from "./hooks/useTextToSpeech";
 import { AgentAudioVisualizerAura } from "./components/agent-audio-visualizer-aura";
 
+/**
+ * Normalize and clean transcript text
+ * Removes duplicate/repeated words and excessive whitespace
+ */
 const normalizeTranscriptWords = (input) => {
   const words = input
     .split(/\s+/)
@@ -32,6 +36,45 @@ const normalizeTranscriptWords = (input) => {
   }
 
   return normalized;
+};
+
+/**
+ * Clean transcript text before sending to backend
+ * - Removes extra whitespace
+ * - Removes duplicate repeated words (up to 3 occurrences)
+ * - Ensures single spaces between words
+ */
+const cleanTranscriptForBackend = (text) => {
+  if (!text || !text.trim()) {
+    return "";
+  }
+
+  // Normalize to remove extra whitespace first
+  let cleaned = text.trim().replace(/\s+/g, " ");
+
+  // Remove excessive repetition of the same word
+  const words = cleaned.split(" ");
+  const deduplicated = [];
+  let lastWord = "";
+  let repeatCount = 0;
+
+  for (const word of words) {
+    const lowered = word.toLowerCase();
+    
+    if (lowered === lastWord.toLowerCase()) {
+      repeatCount += 1;
+      // Allow up to 2 repetitions (3 total occurrences)
+      if (repeatCount <= 2) {
+        deduplicated.push(word);
+      }
+    } else {
+      deduplicated.push(word);
+      lastWord = word;
+      repeatCount = 0;
+    }
+  }
+
+  return deduplicated.join(" ").trim();
 };
 
 const App = () => {
@@ -188,7 +231,9 @@ const App = () => {
   };
 
   const sendTurn = async (messageText) => {
-    const message = messageText.trim();
+    // Clean the transcript before sending to backend
+    const message = cleanTranscriptForBackend(messageText);
+    
     if (!message || isSendingRef.current) {
       if (!message) {
         setStatus("idle");
@@ -196,7 +241,7 @@ const App = () => {
       return;
     }
 
-  resetTranscript();
+    resetTranscript();
     setUserText(message);
     isSendingRef.current = true;
     setStatus("thinking");
