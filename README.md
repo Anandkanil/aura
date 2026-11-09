@@ -27,11 +27,11 @@ Mic → Web Speech API (speech-to-text)
 Chat history (localStorage)  ── POST ──▶  /api/chat  (frontend/netlify/functions/chat.mjs)
                                              • validates and trims the conversation
                                              • rate limits per visitor
-                                             • calls Hugging Face, with model fallback
+                                             • calls Gemini or Hugging Face, with fallback
 Speaker ← speechSynthesis    ◀─ stream ──    • streams the reply back (server-sent events)
 ```
 
-The Hugging Face key stays on the server. There is no separate backend to host.
+API keys stay on the server. There is no separate backend to host.
 
 ## Project structure
 
@@ -67,13 +67,15 @@ HUGGINGFACE_API_KEY=hf_...
 
 ## Configuration
 
-Set these in Netlify → Project configuration → Environment variables:
+Set these in Netlify → Project configuration → Environment variables (mark keys as secret). At least one key is needed; if both are set, Gemini is tried first and Hugging Face is the backup.
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `HUGGINGFACE_API_KEY` | Yes (mark as secret) | Token with permission to call Inference Providers |
-| `HUGGINGFACE_MODEL` | No | Model tried first. Defaults to `meta-llama/Llama-3.1-8B-Instruct`, then falls back to Gemma 3 12B, Qwen 2.5 72B and GPT-OSS 20B |
-| `HUGGINGFACE_BASE_URL` | No | Defaults to `https://router.huggingface.co/v1/chat/completions` |
+| Variable | Purpose |
+| --- | --- |
+| `GEMINI_API_KEY` | Google AI Studio key (free tier). Uses `gemini-flash-latest`, then `gemini-flash-lite-latest` |
+| `GEMINI_MODEL` | Optional: Gemini model to try first |
+| `HUGGINGFACE_API_KEY` | Hugging Face token with permission to call Inference Providers |
+| `HUGGINGFACE_MODEL` | Optional: tried first. Defaults to Llama 3.1 8B, then Gemma 3 12B, Qwen 2.5 72B, GPT-OSS 20B |
+| `HUGGINGFACE_BASE_URL` | Optional: defaults to `https://router.huggingface.co/v1/chat/completions` |
 
 ## Deploying
 
@@ -81,4 +83,4 @@ Pushing to `main` deploys to Netlify automatically.
 
 ## Privacy
 
-Chats are stored only in the visitor's browser. Messages are sent to the AI model through Hugging Face to generate replies.
+Chats are stored only in the visitor's browser. Messages are sent to the AI provider (Google Gemini or Hugging Face) to generate replies.

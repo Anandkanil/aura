@@ -4,16 +4,22 @@
 // instructions, asks a Hugging Face model for a reply and streams it back as
 // server-sent events:  data: {"text":"..."}  ...  data: {"done":true}
 //
-// Environment variables (Netlify -> Project configuration -> Environment):
-//   HUGGINGFACE_API_KEY  required, secret
-//   HUGGINGFACE_MODEL    optional, tried first
+// Environment variables (Netlify -> Project configuration -> Environment).
+// Set at least one key; when both are set, Gemini is tried first.
+//   GEMINI_API_KEY       Google AI Studio key (free tier), secret
+//   GEMINI_MODEL         optional, tried first for Gemini
+//   HUGGINGFACE_API_KEY  Hugging Face token, secret
+//   HUGGINGFACE_MODEL    optional, tried first for Hugging Face
 //   HUGGINGFACE_BASE_URL optional, defaults to the Hugging Face router
 
 export const config = { path: '/api/chat' };
 
-const DEFAULT_BASE_URL = 'https://router.huggingface.co/v1/chat/completions';
-// Fast, widely available instruct models, tried in order.
-const FALLBACK_MODELS = [
+const HF_BASE_URL = 'https://router.huggingface.co/v1/chat/completions';
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+// "latest" aliases follow Google's current Flash models, so they don't retire.
+const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
+// Fast, widely available instruct models on Hugging Face, tried in order.
+const HF_MODELS = [
   'meta-llama/Llama-3.1-8B-Instruct',
   'google/gemma-3-12b-it',
   'Qwen/Qwen2.5-72B-Instruct',
@@ -87,14 +93,35 @@ const trimHistory = (messages) => {
 };
 
 // Is this upstream failure worth trying the next model for?
-const shouldTryNextModel = (status) => [400, 404, 408, 409, 422, 429, 500, 502, 503, 504].includes(status);
+// 401/402/403 also move on: the next provider may have a working key/credits.
+const shouldTryNextModel = (status) =>
+  [400, 401, 402, 403, 404, 408, 409, 422, 429, 500, 502, 503, 504].includes(status);
+
+// Every provider/model combination to try, in order.
+const buildAttempts = () => {
+  const attempts = [];
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (geminiKey) {
+    for (const model of new Set([process.env.GEMINI_MODEL, ...GEMINI_MODELS].filter(Boolean))) {
+      // Gemini "thinking" can use part of the output budget, so allow more room.
+      attempts.push({ provider: 'gemini', url: GEMINI_BASE_URL, key: geminiKey, model, tokenScale: 4 });
+    }
+  }
+  const hfKey = process.env.HUGGINGFACE_API_KEY;
+  if (hfKey) {
+    for (const model of new Set([process.env.HUGGINGFACE_MODEL, ...HF_MODELS].filter(Boolean))) {
+      attempts.push({ provider: 'huggingface', url: process.env.HUGGINGFACE_BASE_URL || HF_BASE_URL, key: hfKey, model, tokenScale: 1 });
+    }
+  }
+  return attempts;
+};
 
 const friendlyUpstreamError = (status) => {
   if (status === 401 || status === 403) {
-    return 'Aura could not sign in to the AI service. The Hugging Face key needs to be checked.';
+    return 'Aura could not sign in to the AI service. The API key needs to be checked.';
   }
   if (status === 402) {
-    return "Aura's AI credits have run out for this month. The Hugging Face account needs more credits or a paid plan.";
+    return "Aura's AI credits have run out. Add a Gemini key or more Hugging Face credits to bring Aura back.";
   }
   if (status === 429) return 'Aura is getting a lot of requests right now. Try again in a minute.';
   return `The AI service is not responding right now (error ${status || 'timeout'}). Try again in a minute.`;
@@ -144,8 +171,8 @@ const relayStream = (upstream, model) =>
 export default async (req, context) => {
   if (req.method !== 'POST') return json(405, { error: 'Use POST.' });
 
-  const apiKey = process.env.HUGGINGFACE_API_KEY;
-  if (!apiKey) return json(500, { error: 'Aura is not set up yet: the Hugging Face key is missing on the server.' });
+  const attempts = buildAttempts();
+  if (!attempts.length) return json(500, { error: 'Aura is not set up yet: no AI key is configured on the server.' });
 
   const visitor = context?.ip || req.headers.get('x-nf-client-connection-ip') || 'unknown';
   if (isRateLimited(visitor)) {
@@ -166,43 +193,46 @@ export default async (req, context) => {
   const messages = [{ role: 'system', content: basePrompt(style) }, ...trimHistory(body.messages)];
   const maxTokens = style === 'detailed' ? 700 : 300;
 
-  const baseUrl = process.env.HUGGINGFACE_BASE_URL || DEFAULT_BASE_URL;
-  const models = [...new Set([process.env.HUGGINGFACE_MODEL, ...FALLBACK_MODELS].filter(Boolean))];
-  let lastStatus = 0;
+  // Report the most informative failure if every attempt fails.
+  let worstStatus = 0;
+  const remember = (status) => {
+    const rank = (code) => ({ 402: 3, 401: 2, 403: 2, 429: 1 })[code] || 0;
+    if (!worstStatus || rank(status) > rank(worstStatus)) worstStatus = status;
+  };
 
-  for (const model of models) {
+  for (const attempt of attempts) {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), FIRST_BYTE_TIMEOUT_MS);
     try {
-      const upstream = await fetch(baseUrl, {
+      const upstream = await fetch(attempt.url, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages, max_tokens: maxTokens, stream: true }),
+        headers: { Authorization: `Bearer ${attempt.key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: attempt.model, messages, max_tokens: maxTokens * attempt.tokenScale, stream: true }),
         signal: abort.signal,
       });
       clearTimeout(timer);
 
       if (!upstream.ok || !upstream.body) {
-        lastStatus = upstream.status;
+        remember(upstream.status);
         const detail = await upstream.text().catch(() => '');
-        console.error('Model failed', model, upstream.status, detail.slice(0, 300));
+        console.error('Model failed', attempt.provider, attempt.model, upstream.status, detail.slice(0, 300));
         if (shouldTryNextModel(upstream.status)) continue;
         return json(502, { error: friendlyUpstreamError(upstream.status) });
       }
 
-      return new Response(relayStream(upstream, model), {
+      return new Response(relayStream(upstream, attempt.model), {
         headers: {
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache, no-transform',
-          'X-Aura-Model': model,
+          'X-Aura-Model': `${attempt.provider}:${attempt.model}`,
         },
       });
     } catch (err) {
       clearTimeout(timer);
-      lastStatus = 504;
-      console.error('Model request failed', model, err?.name, err?.message);
+      remember(504);
+      console.error('Model request failed', attempt.provider, attempt.model, err?.name, err?.message);
     }
   }
 
-  return json(503, { error: friendlyUpstreamError(lastStatus) });
+  return json(503, { error: friendlyUpstreamError(worstStatus) });
 };

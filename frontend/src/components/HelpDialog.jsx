@@ -43,7 +43,7 @@ export function HelpDialog({ open, onClose, voiceSupported }) {
 
         <h3>Privacy</h3>
         <p className="help-note">
-          Chats stay in this browser until you delete them. To answer, Aura sends your messages to an AI model hosted by Hugging Face.
+          Chats stay in this browser until you delete them. To answer, Aura sends your messages to an AI model (Google Gemini or Hugging Face).
         </p>
       </div>
     </div>
