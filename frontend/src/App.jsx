@@ -353,7 +353,8 @@ export default function App() {
 
   useEffect(() => {
     if (!stt.error) return;
-    if (SWITCH_TO_CLOUD.has(stt.error) && cloud.isSupported && !useCloudInput) {
+    if (SWITCH_TO_CLOUD.has(stt.error) && cloud.isSupported) {
+      if (useCloudInput) return; // already switched; the browser's error no longer matters
       setCloudFallback(true);
       try {
         window.sessionStorage.setItem("aura-cloud-voice", "1");
