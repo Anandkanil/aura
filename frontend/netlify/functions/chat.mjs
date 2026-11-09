@@ -205,11 +205,14 @@ export default async (req, context) => {
   };
 
   let lastAttemptStatus = 0;
+  const timings = [];
   for (const attempt of attempts) {
     // The "without extra settings" retry only makes sense after a 400.
     if (attempt.retryOnlyIf400 && lastAttemptStatus !== 400) continue;
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), attempt.timeoutMs);
+    const startedAt = Date.now();
+    const label = `${attempt.model}${attempt.extra ? '+min' : ''}`;
     try {
       const upstream = await fetch(attempt.url, {
         method: 'POST',
@@ -226,6 +229,7 @@ export default async (req, context) => {
       clearTimeout(timer);
 
       lastAttemptStatus = upstream.status;
+      timings.push(`${label}=${upstream.status}@${Date.now() - startedAt}ms`);
       if (!upstream.ok || !upstream.body) {
         remember(upstream.status);
         tried.push(`${attempt.provider}/${attempt.model}: ${upstream.status}`);
@@ -240,10 +244,13 @@ export default async (req, context) => {
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache, no-transform',
           'X-Aura-Model': `${attempt.provider}:${attempt.model}`,
+          // Model names, status codes and timings only: useful for tuning speed.
+          'X-Aura-Attempts': timings.join('; '),
         },
       });
     } catch (err) {
       clearTimeout(timer);
+      timings.push(`${label}=${err?.name === 'AbortError' ? 'timeout' : 'error'}@${Date.now() - startedAt}ms`);
       lastAttemptStatus = 504;
       remember(504);
       tried.push(`${attempt.provider}/${attempt.model}: ${err?.name === 'AbortError' ? 'timeout' : 'network error'}`);
