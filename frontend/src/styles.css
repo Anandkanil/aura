@@ -548,6 +548,14 @@ button:disabled {
   padding-left: 1.25em;
 }
 
+.md ul {
+  list-style: disc;
+}
+
+.md ol {
+  list-style: decimal;
+}
+
 .md li + li {
   margin-top: 0.25em;
 }
@@ -895,6 +903,11 @@ button:disabled {
 .help-steps {
   margin: 14px 0 0;
   padding-left: 1.3em;
+  list-style: decimal;
+}
+
+.help-steps li::marker {
+  color: var(--teal);
 }
 
 .help-steps li + li {

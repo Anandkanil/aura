@@ -12,6 +12,7 @@ import { streamChat } from "./lib/chatStream";
 import { createSentenceSplitter, makeTitle, newId } from "./lib/text";
 
 const PAUSE_TO_SEND_MS = 1300;
+const isTouch = typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches;
 
 const STATUS = {
   idle: { label: "Ready", tone: "idle" },
@@ -258,9 +259,9 @@ export default function App() {
   };
 
   const retryLast = () => {
-    if (!failedTurn || !active) return;
+    if (!active) return;
     const lastUser = [...active.messages].reverse().find((m) => m.role === "user");
-    if (lastUser) void sendMessage(lastUser.content, { viaVoice: failedTurn.viaVoice, retry: true });
+    if (lastUser) void sendMessage(lastUser.content, { viaVoice: Boolean(failedTurn?.viaVoice), retry: true });
   };
 
   // ---------- Voice side effects ----------
@@ -389,7 +390,8 @@ export default function App() {
     if (status === "listening") return settings.handsFree ? "Listening — pause when you're done" : "Listening — tap the mic to send";
     if (status === "thinking") return "Thinking…";
     if (status === "replying" || status === "speaking") return "Tap the mic to cut in";
-    return stt.isSupported ? "Tap the mic or press Space to talk" : "Type your message";
+    if (!stt.isSupported) return "Type your message";
+    return isTouch ? "Tap the mic to talk" : "Tap the mic or press Space to talk";
   }, [status, settings.handsFree, stt.isSupported]);
 
   return (
@@ -499,7 +501,7 @@ export default function App() {
                   <Markdown text={streamingText} />
                 </li>
               )}
-              {failedTurn && failedTurn.conversationId === activeId && status === "idle" && (
+              {status === "idle" && !streamingText && messages[messages.length - 1]?.role === "user" && (
                 <li className="msg-retry">
                   <span>Aura didn't answer that one.</span>
                   <button type="button" className="ghost-button" onClick={retryLast}>
