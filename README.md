@@ -44,7 +44,7 @@ frontend/
     hooks/                     # speech-to-text, speech queue, saved state
     lib/                       # streaming client, text helpers
   public/favicon.svg
-netlify.toml
+frontend/netlify.toml          # Netlify build settings
 ```
 
 ## Run it locally

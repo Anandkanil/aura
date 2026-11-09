@@ -1,6 +1,0 @@
-# Netlify settings for Aura. The site and its /api/chat function live in frontend/.
-[build]
-  base = "frontend"
-  command = "npm run build"
-  publish = "dist"
-  functions = "netlify/functions"

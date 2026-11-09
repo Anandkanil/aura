@@ -1,5 +1,7 @@
-# Used when Netlify's base directory is set to "frontend" in the dashboard.
+# Netlify settings for Aura.
+# The Netlify project uses "frontend" as its package directory, and paths here
+# are resolved from the repository root.
 [build]
   command = "npm run build"
-  publish = "dist"
-  functions = "netlify/functions"
+  publish = "frontend/dist"
+  functions = "frontend/netlify/functions"
