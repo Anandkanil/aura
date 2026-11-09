@@ -11,6 +11,7 @@ import { useSpeechQueue } from "./hooks/useSpeechQueue";
 import { useConversations, useSettings } from "./hooks/useStoredState";
 import { streamChat } from "./lib/chatStream";
 import { createSentenceSplitter, makeTitle, newId } from "./lib/text";
+import { recognitionLanguage } from "./lib/language";
 
 const PAUSE_TO_SEND_MS = 1300;
 const isTouch = typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches;
@@ -101,9 +102,13 @@ export default function App() {
   const inputRef = useRef(null);
   const scrollRef = useRef(null);
 
-  const stt = useSpeechToText({ lang: settings.lang, continuous: true, interimResults: true });
+  const autoLanguage = settings.lang === "auto";
+  const stt = useSpeechToText({ lang: recognitionLanguage(settings.lang), continuous: true, interimResults: true });
   const cloud = useCloudSpeech({ lang: settings.lang });
-  const useCloudInput = cloud.isSupported && (settings.voiceInput === "cloud" || cloudFallback || !stt.isSupported);
+  // In automatic language mode Aura's own recognition is used, because it can
+  // tell which language you're speaking; the browser's needs to be told.
+  const useCloudInput =
+    cloud.isSupported && (autoLanguage || settings.voiceInput === "cloud" || cloudFallback || !stt.isSupported);
   const voiceAvailable = stt.isSupported || cloud.isSupported;
   const tts = useSpeechQueue({ voiceURI: settings.voiceURI, rate: settings.rate, lang: settings.lang });
   const speakReplies = settings.speakReplies !== false;
@@ -457,7 +462,8 @@ export default function App() {
   const liveWords = useCloudInput ? "" : `${stt.transcript} ${stt.interimTranscript}`.trim();
   const listeningPrompt = useCloudInput && settings.handsFree ? "I'm listening… pause when you're done" : "I'm listening…";
   const orb = ORB[status] || ORB.idle;
-  const statusInfo = STATUS[status] || STATUS.idle;
+  const statusInfo =
+    status === "speaking" && tts.isPreparing ? { label: "Preparing voice", tone: "think" } : STATUS[status] || STATUS.idle;
   const micLabel =
     status === "listening"
       ? settings.handsFree
@@ -641,7 +647,7 @@ export default function App() {
         settings={settings}
         onChange={updateSettings}
         voices={tts.voices}
-        onPreviewVoice={() => void tts.speakAll(SAMPLE_TEXT[settings.lang.split("-")[0]] || SAMPLE_TEXT.en)}
+        onPreviewVoice={() => void tts.speakAll(SAMPLE_TEXT[autoLanguage ? "en" : settings.lang.split("-")[0]] || SAMPLE_TEXT.en)}
         onClearAll={() => {
           stopAll();
           setConversations([]);

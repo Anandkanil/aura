@@ -12,6 +12,15 @@ export const LANGUAGE_NAMES = {
   'es-ES': 'Spanish',
   'fr-FR': 'French',
   'de-DE': 'German',
+  // Detected automatically from reply text (used for voices).
+  'kn-IN': 'Kannada',
+  'te-IN': 'Telugu',
+  'bn-IN': 'Bengali',
+  'ar-SA': 'Arabic',
+  'ja-JP': 'Japanese',
+  'ko-KR': 'Korean',
+  'zh-CN': 'Chinese',
+  'ru-RU': 'Russian',
 };
 
 export const languageName = (code) => LANGUAGE_NAMES[code] || null;

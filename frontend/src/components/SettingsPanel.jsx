@@ -3,6 +3,7 @@ import { Volume2, X } from "lucide-react";
 import { browserVoicesFor } from "../hooks/useSpeechQueue";
 
 export const LANGUAGES = [
+  { code: "auto", label: "Automatic — match the language I use" },
   { code: "en-US", label: "English (US)" },
   { code: "en-GB", label: "English (UK)" },
   { code: "en-IN", label: "English (India)" },
@@ -37,7 +38,8 @@ function Toggle({ id, label, hint, checked, onChange }) {
 
 export function SettingsPanel({ open, onClose, settings, onChange, voices, onPreviewVoice, onClearAll, hasChats }) {
   const [confirmClear, setConfirmClear] = useState(false);
-  const matchingVoices = browserVoicesFor(voices, settings.lang);
+  const isAuto = settings.lang === "auto";
+  const matchingVoices = isAuto ? [] : browserVoicesFor(voices, settings.lang);
   const languageLabel = LANGUAGES.find((language) => language.code === settings.lang)?.label || "this language";
 
   return (
@@ -114,7 +116,9 @@ export function SettingsPanel({ open, onClose, settings, onChange, voices, onPre
               ))}
             </div>
             <p className="setting-hint">
-              Automatic uses your browser's recognition and shows your words as you speak, switching to Aura cloud if it doesn't work. Aura cloud works in every browser and is more accurate for Indian languages.
+              {settings.lang === "auto"
+                ? "With the language set to Automatic, Aura uses its cloud recognition so it can tell which language you're speaking."
+                : "Automatic uses your browser's recognition and shows your words as you speak, switching to Aura cloud if it doesn't work. Aura cloud works in every browser and is more accurate for Indian languages."}
             </p>
           </div>
         </section>
@@ -122,13 +126,18 @@ export function SettingsPanel({ open, onClose, settings, onChange, voices, onPre
         <section className="setting-group">
           <h3>Language and voice</h3>
           <label className="field">
-            <span>Language you speak</span>
+            <span>Language</span>
             <select value={settings.lang} onChange={(e) => onChange({ lang: e.target.value, voiceURI: "" })}>
               {LANGUAGES.map((language) => (
                 <option key={language.code} value={language.code}>{language.label}</option>
               ))}
             </select>
           </label>
+          <p className="setting-hint">
+            {isAuto
+              ? "Aura recognises the language you speak or type in, and replies in that language."
+              : `Aura always replies in ${languageLabel}, whatever language you use.`}
+          </p>
           <label className="field">
             <span>Aura's voice</span>
             <select value={settings.voiceURI} onChange={(e) => onChange({ voiceURI: e.target.value })}>
@@ -141,7 +150,10 @@ export function SettingsPanel({ open, onClose, settings, onChange, voices, onPre
               ))}
             </select>
           </label>
-          {matchingVoices.length === 0 && settings.voiceURI !== "cloud" && (
+          {isAuto && settings.voiceURI !== "cloud" && (
+            <p className="setting-hint">Aura picks a voice that matches each reply. Languages your browser can't speak use the cloud voice.</p>
+          )}
+          {!isAuto && matchingVoices.length === 0 && settings.voiceURI !== "cloud" && (
             <p className="setting-hint">This browser has no {languageLabel} voice, so Aura uses its cloud voice.</p>
           )}
           <label className="field">

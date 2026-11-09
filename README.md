@@ -13,7 +13,8 @@ Aura is a voice assistant that runs in the browser. Tap the mic and talk, or typ
 - Streaming replies that are spoken sentence by sentence
 - Tap the mic while Aura is speaking to cut in
 - Saved chats (in this browser only), with a chat list, delete and download as text
-- Settings: reply length, read aloud on/off, language (English US/UK/India, Hindi, Malayalam, Tamil, Spanish, French, German), voice, speaking speed
+- Language: **Automatic** (default) replies in whatever language you speak or type; choosing a language (English US/UK/India, Hindi, Malayalam, Tamil, Spanish, French, German) makes Aura always reply in it
+- Settings: reply length, read aloud on/off, language, voice, speaking speed
 - Works in any browser with a microphone: if the browser's own speech recognition isn't available (Firefox, Brave, in-app browsers), Aura records and transcribes through its server; if the browser has no voice for the chosen language (e.g. Malayalam), Aura speaks with a cloud voice
 - Copy or replay any reply
 - Keyboard shortcuts: `Space` talk/send, `Esc` stop, `/` focus the message box
@@ -77,6 +78,7 @@ Set these in Netlify → Project configuration → Environment variables (mark k
 | --- | --- |
 | `GEMINI_API_KEY` | Google AI Studio key (free tier). Replies use `gemini-flash-lite-latest` (fastest), then `gemini-flash-latest`. Also powers the cloud voice and speech-to-text fallback |
 | `GEMINI_MODEL` | Optional: Gemini model to try first |
+| `GOOGLE_TTS_API_KEY` | Optional: Google Cloud Text-to-Speech key. Fast, reliable cloud voice for languages the browser can't speak (e.g. Malayalam), tried before Gemini's voice |
 | `HUGGINGFACE_API_KEY` | Hugging Face token with permission to call Inference Providers |
 | `HUGGINGFACE_MODEL` | Optional: tried first. Defaults to Llama 3.1 8B, then Gemma 3 12B, Qwen 2.5 72B, GPT-OSS 20B |
 | `HUGGINGFACE_BASE_URL` | Optional: defaults to `https://router.huggingface.co/v1/chat/completions` |

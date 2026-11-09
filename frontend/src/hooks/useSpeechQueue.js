@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toSpeakable } from "../lib/text";
+import { detectLanguage } from "../lib/language";
 
 const synth = typeof window !== "undefined" && "speechSynthesis" in window ? window.speechSynthesis : null;
 
@@ -12,14 +13,18 @@ export const browserVoicesFor = (voices, lang) => {
   return voices.filter((voice) => normalizeLang(voice.lang).split("-")[0] === base);
 };
 
-// Speaks Aura's replies. Uses the browser's own voices, sentence by sentence,
+// Speaks Aura's replies. `lang` may be "auto": the language of each reply is
+// then detected from its text. Uses the browser's own voices, sentence by sentence,
 // so Aura starts talking while the reply is still arriving. When the browser
 // has no voice for the chosen language (or the cloud voice is chosen), the
 // whole reply is spoken by Aura's server voice instead.
 export const useSpeechQueue = ({ voiceURI = "", rate = 1, lang = "en-US" } = {}) => {
   const [voices, setVoices] = useState([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isPreparing, setIsPreparing] = useState(false);
   const [error, setError] = useState("");
+  // Language of the reply currently being spoken.
+  const replyLangRef = useRef(null);
 
   const queueRef = useRef([]);
   const playingRef = useRef(false);
@@ -42,23 +47,27 @@ export const useSpeechQueue = ({ voiceURI = "", rate = 1, lang = "en-US" } = {})
     };
   }, []);
 
+  const currentLang = useCallback(() => replyLangRef.current || (settingsRef.current.lang === "auto" ? "en-US" : settingsRef.current.lang), []);
+
   const usesCloud = useCallback(() => {
-    const { voiceURI: wanted, lang: wantedLang } = settingsRef.current;
+    const { voiceURI: wanted } = settingsRef.current;
     if (wanted === "cloud" || !synth) return true;
-    return browserVoicesFor(synth.getVoices(), wantedLang).length === 0;
-  }, []);
+    return browserVoicesFor(synth.getVoices(), currentLang()).length === 0;
+  }, [currentLang]);
 
   const pickVoice = useCallback(() => {
-    const { voiceURI: wanted, lang: wantedLang } = settingsRef.current;
+    const { voiceURI: wanted } = settingsRef.current;
+    const wantedLang = currentLang();
     const all = synth?.getVoices() || [];
-    if (wanted && wanted !== "cloud") {
+    // A chosen voice only applies to its own language.
+    if (wanted && wanted !== "cloud" && settingsRef.current.lang !== "auto") {
       const exact = all.find((voice) => voice.voiceURI === wanted);
       if (exact) return exact;
     }
     const matching = browserVoicesFor(all, wantedLang);
     const exactLang = matching.filter((voice) => normalizeLang(voice.lang) === wantedLang);
     return exactLang.find(isNatural) || exactLang[0] || matching.find(isNatural) || matching[0] || null;
-  }, []);
+  }, [currentLang]);
 
   const settleWaiters = useCallback((completed) => {
     const waiters = waitersRef.current;
@@ -84,11 +93,12 @@ export const useSpeechQueue = ({ voiceURI = "", rate = 1, lang = "en-US" } = {})
       const abort = new AbortController();
       cloudRef.current.abort = abort;
       setIsSpeaking(true);
+      setIsPreparing(true);
       try {
         const response = await fetch("/api/speak", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, lang: settingsRef.current.lang }),
+          body: JSON.stringify({ text, lang: currentLang() }),
           signal: abort.signal
         });
         if (!response.ok) {
@@ -97,6 +107,7 @@ export const useSpeechQueue = ({ voiceURI = "", rate = 1, lang = "en-US" } = {})
         }
         const blob = await response.blob();
         if (generation !== generationRef.current) return;
+        setIsPreparing(false);
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         audio.playbackRate = settingsRef.current.rate;
@@ -117,10 +128,11 @@ export const useSpeechQueue = ({ voiceURI = "", rate = 1, lang = "en-US" } = {})
       }
       if (generation !== generationRef.current) return;
       clearCloudAudio();
+      setIsPreparing(false);
       setIsSpeaking(false);
       settleWaiters(true);
     },
-    [clearCloudAudio, settleWaiters]
+    [clearCloudAudio, currentLang, settleWaiters]
   );
 
   const playNext = useCallback(() => {
@@ -139,7 +151,7 @@ export const useSpeechQueue = ({ voiceURI = "", rate = 1, lang = "en-US" } = {})
     const utterance = new SpeechSynthesisUtterance(next);
     const voice = pickVoice();
     if (voice) utterance.voice = voice;
-    utterance.lang = voice?.lang || settingsRef.current.lang;
+    utterance.lang = voice?.lang || currentLang();
     utterance.rate = settingsRef.current.rate;
     utterance.onend = () => {
       if (generation === generationRef.current) playNext();
@@ -154,17 +166,19 @@ export const useSpeechQueue = ({ voiceURI = "", rate = 1, lang = "en-US" } = {})
     playingRef.current = true;
     setIsSpeaking(true);
     synth.speak(utterance);
-  }, [pickVoice, settleWaiters]);
+  }, [currentLang, pickVoice, settleWaiters]);
 
   // Start a new spoken reply (stops anything already speaking).
   const begin = useCallback(() => {
     generationRef.current += 1;
     queueRef.current = [];
     cloudTextRef.current = "";
+    replyLangRef.current = null;
     finishedRef.current = false;
     playingRef.current = false;
     synth?.cancel();
     clearCloudAudio();
+    setIsPreparing(false);
     setError("");
   }, [clearCloudAudio]);
 
@@ -172,6 +186,10 @@ export const useSpeechQueue = ({ voiceURI = "", rate = 1, lang = "en-US" } = {})
     (text) => {
       const speakable = toSpeakable(text);
       if (!speakable) return;
+      // In automatic mode the first sentence decides the reply's language.
+      if (!replyLangRef.current) {
+        replyLangRef.current = settingsRef.current.lang === "auto" ? detectLanguage(speakable) : settingsRef.current.lang;
+      }
       if (usesCloud()) {
         cloudTextRef.current = `${cloudTextRef.current} ${speakable}`.trim();
         return;
@@ -215,9 +233,10 @@ export const useSpeechQueue = ({ voiceURI = "", rate = 1, lang = "en-US" } = {})
     playingRef.current = false;
     synth?.cancel();
     clearCloudAudio();
+    setIsPreparing(false);
     setIsSpeaking(false);
     settleWaiters(false);
   }, [clearCloudAudio, settleWaiters]);
 
-  return { isSupported: true, voices, isSpeaking, error, begin, enqueue, finish, speakAll, stop };
+  return { isSupported: true, voices, isSpeaking, isPreparing, error, begin, enqueue, finish, speakAll, stop };
 };

@@ -36,7 +36,7 @@ const usePersist = (key, value) => {
 };
 
 export const DEFAULT_SETTINGS = {
-  lang: "en-US",
+  lang: "auto",
   voiceURI: "",
   rate: 1,
   style: "short",

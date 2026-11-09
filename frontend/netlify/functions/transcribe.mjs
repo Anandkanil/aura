@@ -34,7 +34,9 @@ export default async (req, context) => {
   const language = languageName(body?.lang);
   const instructions = [
     'Transcribe the speech in this recording exactly as spoken.',
-    language ? `The speaker most likely speaks ${language}; write it in that language's own script.` : '',
+    language
+      ? `The speaker most likely speaks ${language}; write it in that language's own script.`
+      : "Detect the language being spoken and write it in that language's own script (for example Malayalam in Malayalam script, Hindi in Devanagari, English in Latin letters).",
     'Return only the transcript, with normal punctuation. Do not translate, summarise or answer it.',
     'If there is no clear speech, return nothing.',
   ]
