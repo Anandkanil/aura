@@ -93,8 +93,11 @@ const friendlyUpstreamError = (status) => {
   if (status === 401 || status === 403) {
     return 'Aura could not sign in to the AI service. The Hugging Face key needs to be checked.';
   }
+  if (status === 402) {
+    return "Aura's AI credits have run out for this month. The Hugging Face account needs more credits or a paid plan.";
+  }
   if (status === 429) return 'Aura is getting a lot of requests right now. Try again in a minute.';
-  return 'The AI service is not responding right now. Try again in a minute.';
+  return `The AI service is not responding right now (error ${status || 'timeout'}). Try again in a minute.`;
 };
 
 const encoder = new TextEncoder();
