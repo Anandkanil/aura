@@ -6,6 +6,7 @@ import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { HelpDialog } from "./components/HelpDialog";
 import { useSpeechToText } from "./hooks/useSpeechToText";
+import { useCloudSpeech } from "./hooks/useCloudSpeech";
 import { useSpeechQueue } from "./hooks/useSpeechQueue";
 import { useConversations, useSettings } from "./hooks/useStoredState";
 import { streamChat } from "./lib/chatStream";
@@ -17,6 +18,7 @@ const isTouch = typeof window !== "undefined" && window.matchMedia?.("(pointer: 
 const STATUS = {
   idle: { label: "Ready", tone: "idle" },
   listening: { label: "Listening", tone: "listen" },
+  transcribing: { label: "Understanding", tone: "think" },
   thinking: { label: "Thinking", tone: "think" },
   replying: { label: "Replying", tone: "speak" },
   speaking: { label: "Speaking", tone: "speak" }
@@ -27,9 +29,24 @@ const ORB = {
   idle: { state: "idle", color: "#8F86FF", shift: 0.3 },
   listening: { state: "listening", color: "#5EF2D6", shift: 0.15 },
   thinking: { state: "thinking", color: "#9B7BFF", shift: 0.25 },
+  transcribing: { state: "thinking", color: "#9B7BFF", shift: 0.25 },
   replying: { state: "speaking", color: "#7FD8FF", shift: 0.45 },
   speaking: { state: "speaking", color: "#7FD8FF", shift: 0.45 }
 };
+
+// Spoken when someone presses "Play a sample" in settings.
+const SAMPLE_TEXT = {
+  en: "Hi, I'm Aura. This is how I'll sound.",
+  hi: "नमस्ते, मैं ऑरा हूँ। मेरी आवाज़ ऐसी सुनाई देगी।",
+  ml: "നമസ്കാരം, ഞാൻ ഓറയാണ്. എന്റെ ശബ്ദം ഇങ്ങനെയായിരിക്കും.",
+  ta: "வணக்கம், நான் ஆரா. என் குரல் இப்படித்தான் இருக்கும்.",
+  es: "Hola, soy Aura. Así es como sonaré.",
+  fr: "Bonjour, je suis Aura. Voici comment je parle.",
+  de: "Hallo, ich bin Aura. So klinge ich."
+};
+
+// Browser speech-recognition failures that mean "use Aura's own recognition".
+const SWITCH_TO_CLOUD = new Set(["network", "service-not-allowed", "unstable", "language-not-supported", "speech-error"]);
 
 const SUGGESTIONS = [
   "Help me plan a calm, productive morning",
@@ -38,8 +55,9 @@ const SUGGESTIONS = [
   "Quiz me on world capitals"
 ];
 
-const speechErrorMessage = (code) => {
+const speechErrorMessage = (code, message) => {
   if (!code || code === "aborted") return null;
+  if (code === "transcribe-failed") return { tone: "error", text: message || "Aura couldn't understand the recording. Try again." };
   if (code === "not-allowed" || code === "service-not-allowed") {
     return { tone: "error", text: "Microphone access is blocked. Allow the microphone for this site in your browser, then tap the mic again." };
   }
@@ -65,6 +83,15 @@ export default function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
   const [failedTurn, setFailedTurn] = useState(null);
+  // Set when the browser's own speech recognition fails, e.g. in browsers
+  // that aren't Google Chrome. Remembered for this visit.
+  const [cloudFallback, setCloudFallback] = useState(() => {
+    try {
+      return window.sessionStorage.getItem("aura-cloud-voice") === "1";
+    } catch {
+      return false;
+    }
+  });
 
   const statusRef = useRef(status);
   statusRef.current = status;
@@ -75,8 +102,11 @@ export default function App() {
   const scrollRef = useRef(null);
 
   const stt = useSpeechToText({ lang: settings.lang, continuous: true, interimResults: true });
+  const cloud = useCloudSpeech({ lang: settings.lang });
+  const useCloudInput = cloud.isSupported && (settings.voiceInput === "cloud" || cloudFallback || !stt.isSupported);
+  const voiceAvailable = stt.isSupported || cloud.isSupported;
   const tts = useSpeechQueue({ voiceURI: settings.voiceURI, rate: settings.rate, lang: settings.lang });
-  const speakReplies = settings.speakReplies !== false && tts.isSupported;
+  const speakReplies = settings.speakReplies !== false;
 
   const active = conversations.find((c) => c.id === activeId) || null;
   const messages = active?.messages || [];
@@ -107,9 +137,10 @@ export default function App() {
     window.clearTimeout(pauseTimerRef.current);
     stt.stopListening();
     stt.resetTranscript();
+    cloud.cancel();
     tts.stop();
     setStatus("idle");
-  }, [stt, tts]);
+  }, [cloud, stt, tts]);
 
   const startNewChat = () => {
     stopAll();
@@ -146,6 +177,7 @@ export default function App() {
       window.clearTimeout(pauseTimerRef.current);
       stt.stopListening();
       stt.resetTranscript();
+      cloud.cancel();
       tts.stop();
       setFailedTurn(null);
 
@@ -176,6 +208,7 @@ export default function App() {
         const reply = await streamChat({
           messages: history.map(({ role, content }) => ({ role, content })),
           style: settings.style,
+          lang: settings.lang,
           signal: controller.signal,
           onText: (chunk, full) => {
             if (statusRef.current === "thinking") setStatus("replying");
@@ -204,10 +237,8 @@ export default function App() {
         // Stopped, or the person started talking again, while Aura was speaking.
         if (statusRef.current === "idle" || statusRef.current === "listening") return;
 
-        if (finishedSpeaking && viaVoice && settings.autoListen && stt.isSupported) {
-          stt.resetTranscript();
-          stt.startListening();
-          setStatus("listening");
+        if (finishedSpeaking && viaVoice && settings.autoListen && voiceAvailable) {
+          startListeningRef.current();
         } else {
           setStatus("idle");
         }
@@ -225,32 +256,62 @@ export default function App() {
         notify(error.message || "Aura couldn't answer. Try again.");
       }
     },
-    [active, activeId, notify, setConversations, settings.autoListen, settings.style, speakReplies, stt, tts, updateConversation]
+    [active, activeId, cloud, notify, setConversations, settings.autoListen, settings.lang, settings.style, speakReplies, stt, tts, updateConversation, voiceAvailable]
   );
 
   const sendFromMic = useCallback(async () => {
     window.clearTimeout(pauseTimerRef.current);
+    if (useCloudInput) {
+      setStatus("transcribing");
+      const heard = await cloud.stop();
+      if (statusRef.current !== "transcribing") return; // stopped meanwhile
+      if (heard) await sendMessage(heard, { viaVoice: true });
+      else {
+        setStatus("idle");
+        notify("I didn't catch that. Tap the mic and try again.", "info");
+      }
+      return;
+    }
     const heard = await stt.stopListeningAndGetTranscript();
     const text = heard || stt.interimTranscript;
     if (text.trim()) await sendMessage(text, { viaVoice: true });
     else setStatus("idle");
-  }, [sendMessage, stt]);
+  }, [cloud, notify, sendMessage, stt, useCloudInput]);
 
-  const startListening = useCallback(() => {
-    if (!stt.isSupported) {
-      notify("Voice input isn't available in this browser. Type to Aura, or use Chrome, Edge or Safari to talk.", "info");
-      inputRef.current?.focus();
-      return;
-    }
-    abortRef.current?.abort();
-    tts.stop();
-    stt.resetTranscript();
-    stt.startListening();
-    setStatus("listening");
-  }, [notify, stt, tts]);
+  const sendFromMicRef = useRef(sendFromMic);
+  sendFromMicRef.current = sendFromMic;
+
+  const startListening = useCallback(
+    async ({ forceCloud = false } = {}) => {
+      if (!voiceAvailable) {
+        notify("Voice input isn't available in this browser. Type to Aura instead.", "info");
+        inputRef.current?.focus();
+        return;
+      }
+      abortRef.current?.abort();
+      tts.stop();
+      stt.resetTranscript();
+      if (useCloudInput || forceCloud) {
+        stt.stopListening();
+        setStatus("listening");
+        const started = await cloud.start({
+          onPause: settings.handsFree ? () => void sendFromMicRef.current() : undefined
+        });
+        if (!started) setStatus("idle");
+        return;
+      }
+      stt.startListening();
+      setStatus("listening");
+    },
+    [cloud, notify, settings.handsFree, stt, tts, useCloudInput, voiceAvailable]
+  );
+
+  const startListeningRef = useRef(startListening);
+  startListeningRef.current = startListening;
 
   // The one big button: start, send, or cut in.
   const onMicPress = () => {
+    if (status === "transcribing") return;
     if (status === "listening") {
       void sendFromMic();
       return;
@@ -267,18 +328,18 @@ export default function App() {
   // ---------- Voice side effects ----------
   // Hands-free: send after a short pause in speech.
   useEffect(() => {
-    if (status !== "listening" || !settings.handsFree) return undefined;
+    if (useCloudInput || status !== "listening" || !settings.handsFree) return undefined;
     if (!stt.transcript.trim()) return undefined;
     window.clearTimeout(pauseTimerRef.current);
     pauseTimerRef.current = window.setTimeout(() => {
       if (statusRef.current === "listening") void sendFromMic();
     }, PAUSE_TO_SEND_MS);
     return () => window.clearTimeout(pauseTimerRef.current);
-  }, [stt.transcript, stt.interimTranscript, status, settings.handsFree, sendFromMic]);
+  }, [stt.transcript, stt.interimTranscript, status, settings.handsFree, sendFromMic, useCloudInput]);
 
   // If the browser stops listening on its own, go back to ready.
   useEffect(() => {
-    if (!stt.isListening && status === "listening" && !sendingRef.current) {
+    if (!useCloudInput && !stt.isListening && status === "listening" && !sendingRef.current) {
       const timer = window.setTimeout(() => {
         if (statusRef.current === "listening" && !sendingRef.current) {
           if (stt.transcript.trim() && settings.handsFree) void sendFromMic();
@@ -288,17 +349,34 @@ export default function App() {
       return () => window.clearTimeout(timer);
     }
     return undefined;
-  }, [stt.isListening, stt.transcript, status, settings.handsFree, sendFromMic]);
+  }, [stt.isListening, stt.transcript, status, settings.handsFree, sendFromMic, useCloudInput]);
 
   useEffect(() => {
+    if (!stt.error) return;
+    if (SWITCH_TO_CLOUD.has(stt.error) && cloud.isSupported && !useCloudInput) {
+      setCloudFallback(true);
+      try {
+        window.sessionStorage.setItem("aura-cloud-voice", "1");
+      } catch {
+        // ignore
+      }
+      notify("Switched to Aura's own voice recognition, which works in any browser.", "info");
+      if (statusRef.current === "listening") void startListeningRef.current({ forceCloud: true });
+      return;
+    }
     const message = speechErrorMessage(stt.error);
     if (message) notify(message.text, message.tone);
-  }, [stt.error, notify]);
+  }, [stt.error, notify, cloud.isSupported, useCloudInput]);
 
   useEffect(() => {
-    if (tts.error && tts.error !== "interrupted" && tts.error !== "canceled") {
-      notify("Aura couldn't read the reply aloud in this browser. You can still read it on screen.", "info");
-    }
+    if (!cloud.error) return;
+    if (cloud.error.code === "silence-timeout" && statusRef.current === "listening") setStatus("idle");
+    const message = speechErrorMessage(cloud.error.code, cloud.error.message);
+    if (message) notify(message.text, message.tone);
+  }, [cloud.error, notify]);
+
+  useEffect(() => {
+    if (tts.error) notify(tts.error, "info");
   }, [tts.error, notify]);
 
   // ---------- Keyboard ----------
@@ -345,6 +423,7 @@ export default function App() {
 
   const replayMessage = (message) => {
     stt.stopListening();
+    cloud.cancel();
     setStatus("speaking");
     void tts.speakAll(message.content).then(() => {
       if (statusRef.current === "speaking") setStatus("idle");
@@ -374,7 +453,8 @@ export default function App() {
   };
 
   // ---------- View ----------
-  const liveWords = `${stt.transcript} ${stt.interimTranscript}`.trim();
+  const liveWords = useCloudInput ? "" : `${stt.transcript} ${stt.interimTranscript}`.trim();
+  const listeningPrompt = useCloudInput && settings.handsFree ? "I'm listening… pause when you're done" : "I'm listening…";
   const orb = ORB[status] || ORB.idle;
   const statusInfo = STATUS[status] || STATUS.idle;
   const micLabel =
@@ -388,11 +468,12 @@ export default function App() {
 
   const composerHint = useMemo(() => {
     if (status === "listening") return settings.handsFree ? "Listening — pause when you're done" : "Listening — tap the mic to send";
+    if (status === "transcribing") return "Turning your words into text…";
     if (status === "thinking") return "Thinking…";
     if (status === "replying" || status === "speaking") return "Tap the mic to cut in";
-    if (!stt.isSupported) return "Type your message";
+    if (!voiceAvailable) return "Type your message";
     return isTouch ? "Tap the mic to talk" : "Tap the mic or press Space to talk";
-  }, [status, settings.handsFree, stt.isSupported]);
+  }, [status, settings.handsFree, voiceAvailable]);
 
   return (
     <div className="app">
@@ -449,12 +530,12 @@ export default function App() {
           {isEmpty && (
             <section className="welcome">
               {status === "listening" ? (
-                <p className={`live-words ${liveWords ? "" : "is-waiting"}`}>{liveWords || "I'm listening…"}</p>
+                <p className={`live-words ${liveWords ? "" : "is-waiting"}`}>{liveWords || listeningPrompt}</p>
               ) : (
                 <>
                   <h1>Hi, I'm Aura.</h1>
                   <p className="welcome-sub">
-                    {stt.isSupported ? "Tap the mic and talk to me, or type below." : "Type a message below to start. Voice works in Chrome, Edge and Safari."}
+                    {voiceAvailable ? "Tap the mic and talk to me, or type below." : "Type a message below to start."}
                   </p>
                   <div className="suggestions">
                     {SUGGESTIONS.map((suggestion) => (
@@ -482,11 +563,9 @@ export default function App() {
                       <button type="button" className="icon-button small" onClick={() => copyMessage(message)} aria-label="Copy reply" title="Copy">
                         {copiedId === message.id ? <Check size={14} /> : <Copy size={14} />}
                       </button>
-                      {tts.isSupported && (
-                        <button type="button" className="icon-button small" onClick={() => replayMessage(message)} aria-label="Read reply aloud" title="Read aloud">
-                          <Volume2 size={14} />
-                        </button>
-                      )}
+                      <button type="button" className="icon-button small" onClick={() => replayMessage(message)} aria-label="Read reply aloud" title="Read aloud">
+                        <Volume2 size={14} />
+                      </button>
                     </div>
                   </li>
                 )
@@ -516,13 +595,13 @@ export default function App() {
         <footer className="composer-wrap">
           {!isEmpty && status === "listening" && (
             <p className={`live-words docked ${liveWords ? "" : "is-waiting"}`} aria-live="polite">
-              {liveWords || "I'm listening…"}
+              {liveWords || listeningPrompt}
             </p>
           )}
           <form className="composer" onSubmit={submitDraft}>
             <button
               type="button"
-              className={`mic tone-${statusInfo.tone} ${stt.isSupported ? "" : "is-unavailable"}`}
+              className={`mic tone-${statusInfo.tone} ${voiceAvailable ? "" : "is-unavailable"}`}
               onClick={onMicPress}
               aria-label={micLabel}
               title={micLabel}
@@ -541,7 +620,7 @@ export default function App() {
                 if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) submitDraft(event);
               }}
             />
-            {status === "thinking" || status === "replying" || status === "speaking" ? (
+            {status === "thinking" || status === "transcribing" || status === "replying" || status === "speaking" ? (
               <button type="button" className="send stop" onClick={stopAll} aria-label="Stop" title="Stop">
                 <Square size={16} fill="currentColor" />
               </button>
@@ -561,7 +640,7 @@ export default function App() {
         settings={settings}
         onChange={updateSettings}
         voices={tts.voices}
-        onPreviewVoice={() => void tts.speakAll("Hi, I'm Aura. This is how I'll sound.")}
+        onPreviewVoice={() => void tts.speakAll(SAMPLE_TEXT[settings.lang.split("-")[0]] || SAMPLE_TEXT.en)}
         onClearAll={() => {
           stopAll();
           setConversations([]);
@@ -569,7 +648,7 @@ export default function App() {
         }}
         hasChats={conversations.length > 0}
       />
-      <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} voiceSupported={stt.isSupported} />
+      <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} voiceSupported={voiceAvailable} />
 
       <div className="toasts" aria-live="polite">
         {toasts.map((toast) => (

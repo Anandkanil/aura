@@ -12,6 +12,8 @@
 //   HUGGINGFACE_MODEL    optional, tried first for Hugging Face
 //   HUGGINGFACE_BASE_URL optional, defaults to the Hugging Face router
 
+import { languageName } from '../lib/common.mjs';
+
 export const config = { path: '/api/chat' };
 
 const HF_BASE_URL = 'https://router.huggingface.co/v1/chat/completions';
@@ -38,11 +40,13 @@ const STYLE_PROMPTS = {
   detailed: 'Give complete, well-organised answers, but stay conversational.',
 };
 
-const basePrompt = (style) =>
+const basePrompt = (style, language) =>
   [
     'You are Aura, a warm and helpful voice assistant.',
     'Your replies are read aloud, so write the way a friendly person talks: natural sentences, contractions, no emoji, no tables, no code blocks unless asked, and only use a short list when it truly helps.',
-    "Reply in the same language as the person's latest message.",
+    language && !language.startsWith('English')
+      ? `The person has chosen ${language} as their language. Reply in ${language}, written in its own script, unless they clearly write to you in a different language.`
+      : "Reply in the same language as the person's latest message.",
     STYLE_PROMPTS[style] || STYLE_PROMPTS.short,
   ].join(' ');
 
@@ -194,7 +198,7 @@ export default async (req, context) => {
   if (problem) return json(400, { error: problem });
 
   const style = body?.style === 'detailed' ? 'detailed' : 'short';
-  const messages = [{ role: 'system', content: basePrompt(style) }, ...trimHistory(body.messages)];
+  const messages = [{ role: 'system', content: basePrompt(style, languageName(body?.lang)) }, ...trimHistory(body.messages)];
   const maxTokens = style === 'detailed' ? 700 : 300;
 
   // Report the most informative failure if every attempt fails.

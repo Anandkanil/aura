@@ -29,7 +29,7 @@ export function HelpDialog({ open, onClose, voiceSupported }) {
 
         {!voiceSupported && (
           <p className="help-warning">
-            Voice input isn't available in this browser. Typing works everywhere; for talking, use Chrome, Edge or Safari.
+            This browser can't use a microphone here, so voice input isn't available. You can still type to Aura.
           </p>
         )}
 

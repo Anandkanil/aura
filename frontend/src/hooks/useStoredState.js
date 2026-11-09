@@ -41,7 +41,9 @@ export const DEFAULT_SETTINGS = {
   rate: 1,
   style: "short",
   handsFree: true,
-  autoListen: true
+  autoListen: true,
+  speakReplies: true,
+  voiceInput: "auto"
 };
 
 export const useSettings = () => {

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Volume2, X } from "lucide-react";
+import { browserVoicesFor } from "../hooks/useSpeechQueue";
 
 export const LANGUAGES = [
   { code: "en-US", label: "English (US)" },
@@ -36,8 +37,8 @@ function Toggle({ id, label, hint, checked, onChange }) {
 
 export function SettingsPanel({ open, onClose, settings, onChange, voices, onPreviewVoice, onClearAll, hasChats }) {
   const [confirmClear, setConfirmClear] = useState(false);
-  const base = settings.lang.split("-")[0];
-  const matchingVoices = voices.filter((voice) => voice.lang?.replace("_", "-").startsWith(base));
+  const matchingVoices = browserVoicesFor(voices, settings.lang);
+  const languageLabel = LANGUAGES.find((language) => language.code === settings.lang)?.label || "this language";
 
   return (
     <>
@@ -93,6 +94,29 @@ export function SettingsPanel({ open, onClose, settings, onChange, voices, onPre
             checked={settings.autoListen}
             onChange={(value) => onChange({ autoListen: value })}
           />
+          <div>
+            <p className="setting-label" id="voice-input-label">Voice recognition</p>
+            <div className="segmented" role="radiogroup" aria-labelledby="voice-input-label">
+              {[
+                ["auto", "Automatic"],
+                ["cloud", "Aura cloud"]
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={(settings.voiceInput || "auto") === value}
+                  className={(settings.voiceInput || "auto") === value ? "is-selected" : ""}
+                  onClick={() => onChange({ voiceInput: value })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="setting-hint">
+              Automatic uses your browser's recognition and shows your words as you speak, switching to Aura cloud if it doesn't work. Aura cloud works in every browser and is more accurate for Indian languages.
+            </p>
+          </div>
         </section>
 
         <section className="setting-group">
@@ -109,6 +133,7 @@ export function SettingsPanel({ open, onClose, settings, onChange, voices, onPre
             <span>Aura's voice</span>
             <select value={settings.voiceURI} onChange={(e) => onChange({ voiceURI: e.target.value })}>
               <option value="">Automatic</option>
+              <option value="cloud">Aura cloud voice (works for every language)</option>
               {matchingVoices.map((voice) => (
                 <option key={voice.voiceURI} value={voice.voiceURI}>
                   {voice.name}
@@ -116,8 +141,8 @@ export function SettingsPanel({ open, onClose, settings, onChange, voices, onPre
               ))}
             </select>
           </label>
-          {matchingVoices.length === 0 && (
-            <p className="setting-hint">This browser has no voices for this language, so Aura will use its default voice.</p>
+          {matchingVoices.length === 0 && settings.voiceURI !== "cloud" && (
+            <p className="setting-hint">This browser has no {languageLabel} voice, so Aura uses its cloud voice.</p>
           )}
           <label className="field">
             <span>Speaking speed: {Number(settings.rate).toFixed(1)}×</span>

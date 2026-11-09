@@ -1,10 +1,10 @@
 // Sends the conversation to /api/chat and calls onText for each piece of the
 // reply as it streams in. Resolves with the full reply text.
-export async function streamChat({ messages, style, signal, onText }) {
+export async function streamChat({ messages, style, lang, signal, onText }) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, style }),
+    body: JSON.stringify({ messages, style, lang }),
     signal
   });
 

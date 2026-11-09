@@ -14,9 +14,10 @@ Aura is a voice assistant that runs in the browser. Tap the mic and talk, or typ
 - Tap the mic while Aura is speaking to cut in
 - Saved chats (in this browser only), with a chat list, delete and download as text
 - Settings: reply length, read aloud on/off, language (English US/UK/India, Hindi, Malayalam, Tamil, Spanish, French, German), voice, speaking speed
+- Works in any browser with a microphone: if the browser's own speech recognition isn't available (Firefox, Brave, in-app browsers), Aura records and transcribes through its server; if the browser has no voice for the chosen language (e.g. Malayalam), Aura speaks with a cloud voice
 - Copy or replay any reply
 - Keyboard shortcuts: `Space` talk/send, `Esc` stop, `/` focus the message box
-- Works on phone, tablet and desktop. Typing works in every browser; voice input needs Chrome, Edge or Safari
+- Works on phone, tablet and desktop
 
 ## How it works
 
@@ -37,7 +38,10 @@ API keys stay on the server. There is no separate backend to host.
 
 ```text
 frontend/
-  netlify/functions/chat.mjs   # the AI endpoint
+  netlify/functions/chat.mjs        # AI replies (/api/chat)
+  netlify/functions/transcribe.mjs  # speech-to-text fallback (/api/transcribe)
+  netlify/functions/speak.mjs       # cloud voice (/api/speak)
+  netlify/lib/common.mjs            # shared helpers
   src/
     App.jsx                    # main screen and conversation logic
     components/                # orb visualiser, sidebar, settings, help, markdown
@@ -71,7 +75,7 @@ Set these in Netlify → Project configuration → Environment variables (mark k
 
 | Variable | Purpose |
 | --- | --- |
-| `GEMINI_API_KEY` | Google AI Studio key (free tier). Uses `gemini-flash-lite-latest` (fastest), then `gemini-flash-latest` |
+| `GEMINI_API_KEY` | Google AI Studio key (free tier). Replies use `gemini-flash-lite-latest` (fastest), then `gemini-flash-latest`. Also powers the cloud voice and speech-to-text fallback |
 | `GEMINI_MODEL` | Optional: Gemini model to try first |
 | `HUGGINGFACE_API_KEY` | Hugging Face token with permission to call Inference Providers |
 | `HUGGINGFACE_MODEL` | Optional: tried first. Defaults to Llama 3.1 8B, then Gemma 3 12B, Qwen 2.5 72B, GPT-OSS 20B |
