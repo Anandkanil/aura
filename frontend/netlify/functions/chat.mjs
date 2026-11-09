@@ -103,14 +103,17 @@ const buildAttempts = () => {
   const geminiKey = process.env.GEMINI_API_KEY;
   if (geminiKey) {
     for (const model of new Set([process.env.GEMINI_MODEL, ...GEMINI_MODELS].filter(Boolean))) {
-      // Gemini "thinking" can use part of the output budget, so allow more room.
-      attempts.push({ provider: 'gemini', url: GEMINI_BASE_URL, key: geminiKey, model, tokenScale: 4 });
+      // Voice replies should start fast, so ask for minimal "thinking". If a
+      // model rejects that setting, the next attempt retries without it.
+      const base = { provider: 'gemini', url: GEMINI_BASE_URL, key: geminiKey, model, tokenScale: 4, timeoutMs: 10000 };
+      attempts.push({ ...base, extra: { reasoning_effort: 'minimal' } });
+      attempts.push({ ...base, retryOnlyIf400: true });
     }
   }
   const hfKey = process.env.HUGGINGFACE_API_KEY;
   if (hfKey) {
     for (const model of new Set([process.env.HUGGINGFACE_MODEL, ...HF_MODELS].filter(Boolean))) {
-      attempts.push({ provider: 'huggingface', url: process.env.HUGGINGFACE_BASE_URL || HF_BASE_URL, key: hfKey, model, tokenScale: 1 });
+      attempts.push({ provider: 'huggingface', url: process.env.HUGGINGFACE_BASE_URL || HF_BASE_URL, key: hfKey, model, tokenScale: 1, timeoutMs: FIRST_BYTE_TIMEOUT_MS });
     }
   }
   return attempts;
@@ -201,18 +204,28 @@ export default async (req, context) => {
     if (!worstStatus || rank(status) > rank(worstStatus)) worstStatus = status;
   };
 
+  let lastAttemptStatus = 0;
   for (const attempt of attempts) {
+    // The "without extra settings" retry only makes sense after a 400.
+    if (attempt.retryOnlyIf400 && lastAttemptStatus !== 400) continue;
     const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), FIRST_BYTE_TIMEOUT_MS);
+    const timer = setTimeout(() => abort.abort(), attempt.timeoutMs);
     try {
       const upstream = await fetch(attempt.url, {
         method: 'POST',
         headers: { Authorization: `Bearer ${attempt.key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: attempt.model, messages, max_tokens: maxTokens * attempt.tokenScale, stream: true }),
+        body: JSON.stringify({
+          model: attempt.model,
+          messages,
+          max_tokens: maxTokens * attempt.tokenScale,
+          stream: true,
+          ...(attempt.extra || {}),
+        }),
         signal: abort.signal,
       });
       clearTimeout(timer);
 
+      lastAttemptStatus = upstream.status;
       if (!upstream.ok || !upstream.body) {
         remember(upstream.status);
         tried.push(`${attempt.provider}/${attempt.model}: ${upstream.status}`);
@@ -231,6 +244,7 @@ export default async (req, context) => {
       });
     } catch (err) {
       clearTimeout(timer);
+      lastAttemptStatus = 504;
       remember(504);
       tried.push(`${attempt.provider}/${attempt.model}: ${err?.name === 'AbortError' ? 'timeout' : 'network error'}`);
       console.error('Model request failed', attempt.provider, attempt.model, err?.name, err?.message);
