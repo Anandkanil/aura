@@ -16,8 +16,9 @@ export const config = { path: '/api/chat' };
 
 const HF_BASE_URL = 'https://router.huggingface.co/v1/chat/completions';
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
-// "latest" aliases follow Google's current Flash models, so they don't retire.
-const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
+// "latest" aliases follow Google's current models, so they don't retire.
+// Flash-Lite first: it answers in well under a second, which suits voice.
+const GEMINI_MODELS = ['gemini-flash-lite-latest', 'gemini-flash-latest'];
 // Fast, widely available instruct models on Hugging Face, tried in order.
 const HF_MODELS = [
   'meta-llama/Llama-3.1-8B-Instruct',

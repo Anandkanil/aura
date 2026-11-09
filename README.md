@@ -71,7 +71,7 @@ Set these in Netlify → Project configuration → Environment variables (mark k
 
 | Variable | Purpose |
 | --- | --- |
-| `GEMINI_API_KEY` | Google AI Studio key (free tier). Uses `gemini-flash-latest`, then `gemini-flash-lite-latest` |
+| `GEMINI_API_KEY` | Google AI Studio key (free tier). Uses `gemini-flash-lite-latest` (fastest), then `gemini-flash-latest` |
 | `GEMINI_MODEL` | Optional: Gemini model to try first |
 | `HUGGINGFACE_API_KEY` | Hugging Face token with permission to call Inference Providers |
 | `HUGGINGFACE_MODEL` | Optional: tried first. Defaults to Llama 3.1 8B, then Gemma 3 12B, Qwen 2.5 72B, GPT-OSS 20B |
