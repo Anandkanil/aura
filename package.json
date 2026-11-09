@@ -3,16 +3,11 @@
   "private": true,
   "version": "1.0.0",
   "workspaces": [
-    "frontend",
-    "backend"
+    "frontend"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev -w backend\" \"npm run dev -w frontend\"",
-    "dev:frontend": "npm run dev -w frontend",
-    "dev:backend": "npm run dev -w backend",
+    "dev": "npm run dev -w frontend",
+    "dev:netlify": "cd frontend && npx netlify dev",
     "build": "npm run build -w frontend"
-  },
-  "devDependencies": {
-    "concurrently": "^9.1.2"
   }
 }

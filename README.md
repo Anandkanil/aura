@@ -1,122 +1,84 @@
 # Aura
 
-Aura is a real-time voice assistant web app built with React + Express.
+Aura is a voice assistant that runs in the browser. Tap the mic and talk, or type. Aura answers on screen and out loud, starting to speak as soon as the first sentence of its reply arrives.
 
-Architecture: Mic -> STT -> Backend -> LLM -> TTS -> Speaker
+**Live:** https://auraa-voice.netlify.app
 
-## Screenshot
-
-![Aura Home](docs/images/aura-home.jpeg)
+![Aura](docs/images/aura-home.jpeg)
 
 ## Features
 
-- Voice-first interaction with speech-to-text and text-to-speech
-- Live transcript and assistant response flow
-- Session-based chat state across turns
-- Modern responsive UI (phone, tablet, desktop)
-- Manual text prompt fallback when voice is unavailable
+- Talk or type; your words appear live while you speak
+- Hands-free mode: Aura sends your message when you pause, and listens again after it answers
+- Streaming replies that are spoken sentence by sentence
+- Tap the mic while Aura is speaking to cut in
+- Saved chats (in this browser only), with a chat list, delete and download as text
+- Settings: reply length, read aloud on/off, language (English US/UK/India, Hindi, Malayalam, Tamil, Spanish, French, German), voice, speaking speed
+- Copy or replay any reply
+- Keyboard shortcuts: `Space` talk/send, `Esc` stop, `/` focus the message box
+- Works on phone, tablet and desktop. Typing works in every browser; voice input needs Chrome, Edge or Safari
 
-## Tech Stack
+## How it works
 
-- Frontend: React, Vite, Tailwind pipeline, Lucide icons
-- Backend: Node.js, Express
-- AI Provider: Hugging Face Inference API (OpenAI-compatible endpoint)
-
-## Project Structure
-
-```text
-vapi/
-  frontend/
-    src/
-      api/
-      components/
-      hooks/
-      lib/
-      App.jsx
-  backend/
-    src/
-      config/
-      controllers/
-      routes/
-      services/
-      app.js
-      server.js
-  docs/
-    images/
-      aura-home.jpeg
+```
+Browser                                   Netlify
+──────────────────────────────            ─────────────────────────────────
+Mic → Web Speech API (speech-to-text)
+Chat history (localStorage)  ── POST ──▶  /api/chat  (frontend/netlify/functions/chat.mjs)
+                                             • validates and trims the conversation
+                                             • rate limits per visitor
+                                             • calls Hugging Face, with model fallback
+Speaker ← speechSynthesis    ◀─ stream ──    • streams the reply back (server-sent events)
 ```
 
-## Prerequisites
+The Hugging Face key stays on the server. There is no separate backend to host.
 
-- Node.js 18+
-- npm 9+
+## Project structure
 
-## Setup
+```text
+frontend/
+  netlify/functions/chat.mjs   # the AI endpoint
+  src/
+    App.jsx                    # main screen and conversation logic
+    components/                # orb visualiser, sidebar, settings, help, markdown
+    hooks/                     # speech-to-text, speech queue, saved state
+    lib/                       # streaming client, text helpers
+  public/favicon.svg
+netlify.toml
+```
 
-1. Install dependencies:
+## Run it locally
+
+Requires Node.js 18+.
 
 ```bash
 npm install
+cd frontend
+npx netlify dev        # runs the site and the /api/chat function together
 ```
 
-2. Create backend environment file:
+Create `frontend/.env` with your key for local testing (it's git-ignored):
 
-```bash
-cp backend/.env.example backend/.env
+```
+HUGGINGFACE_API_KEY=hf_...
 ```
 
-3. Configure required variables in `backend/.env`:
+`npm run dev` starts the site alone (without the AI endpoint).
 
-- `HUGGINGFACE_API_KEY` (required)
-- `HUGGINGFACE_MODEL` (recommended: `Qwen/Qwen2.5-7B-Instruct`)
-- `HUGGINGFACE_BASE_URL` (optional)
+## Configuration
 
-4. Run the app:
+Set these in Netlify → Project configuration → Environment variables:
 
-```bash
-npm run dev
-```
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `HUGGINGFACE_API_KEY` | Yes (mark as secret) | Token with permission to call Inference Providers |
+| `HUGGINGFACE_MODEL` | No | Model tried first. Defaults to `meta-llama/Llama-3.1-8B-Instruct`, then falls back to Gemma 3 12B, Qwen 2.5 72B and GPT-OSS 20B |
+| `HUGGINGFACE_BASE_URL` | No | Defaults to `https://router.huggingface.co/v1/chat/completions` |
 
-5. Open:
+## Deploying
 
-- Frontend: http://localhost:5173
-- Backend: http://localhost:4000
+Pushing to `main` deploys to Netlify automatically.
 
-## Available Scripts
+## Privacy
 
-- `npm run dev`: runs frontend + backend concurrently
-- `npm run dev:frontend`: runs only frontend
-- `npm run dev:backend`: runs only backend
-- `npm run build`: builds frontend
-
-## API
-
-### `POST /api/chat`
-
-Request:
-
-```json
-{
-  "sessionId": "optional-session-id",
-  "message": "Hello there"
-}
-```
-
-Response:
-
-```json
-{
-  "sessionId": "generated-or-passed-session-id",
-  "reply": "Assistant response",
-  "history": [
-    { "role": "user", "content": "Hello there" },
-    { "role": "assistant", "content": "Assistant response" }
-  ]
-}
-```
-
-## Notes
-
-- Web Speech API support depends on browser capabilities (best in Chromium browsers).
-- If Aura does not behave correctly in your current browser, switch to a different browser and test again.
-- Session history currently uses in-memory storage. Use Redis or a database for production.
+Chats are stored only in the visitor's browser. Messages are sent to the AI model through Hugging Face to generate replies.

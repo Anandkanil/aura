@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const SILENCE_TIMEOUT_MS = 3000;
+const SILENCE_TIMEOUT_MS = 6000;
 const RESTART_DELAY_MS = 140;
 const STOP_RESOLVE_DEBOUNCE_MS = 180;
 const RESTART_WINDOW_MS = 10000;
@@ -165,11 +165,10 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
     recognition.lang = lang;
     // Mobile browsers are more stable with non-continuous sessions that we manually restart.
     recognition.continuous = isMobileRef.current ? false : continuous;
-    // Final-only transcript handling keeps backend input clean and predictable.
-    recognition.interimResults = false;
+    // Interim results are only shown on screen; only final text is sent.
+    recognition.interimResults = interimResults;
 
     recognition.onstart = () => {
-      console.log("[speech] recognition started");
       isStartingRef.current = false;
       isListeningRef.current = true;
       setIsListening(true);
@@ -183,9 +182,12 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
     recognition.onresult = (event) => {
       let nextTranscript = transcriptRef.current;
       let hasFinalResult = false;
+      let interim = "";
 
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         if (!event.results[i].isFinal) {
+          interim += ` ${event.results[i][0].transcript || ""}`;
+          lastSpeechTimeRef.current = Date.now();
           continue;
         }
 
@@ -203,29 +205,15 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
         const clean = cleanTranscript(nextTranscript);
         transcriptRef.current = clean;
         setTranscript(clean);
-        setInterimTranscript("");
-        interimTranscriptRef.current = "";
-        console.log("[speech] final segment captured");
       }
+      const nextInterim = normalizeText(interim);
+      interimTranscriptRef.current = nextInterim;
+      setInterimTranscript(nextInterim);
     };
 
     recognition.onerror = (event) => {
-      console.log("[speech] recognition error", event.error);
 
-      let friendlyError = event.error || "Speech recognition error";
-
-      // Provide mobile-specific error messages
-      if (isMobileRef.current) {
-        if (event.error === "network") {
-          friendlyError = "Network error. Check your internet connection.";
-        } else if (event.error === "audio-capture") {
-          friendlyError = "Cannot access microphone. Check device permissions.";
-        } else if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-          friendlyError = "Microphone permission denied.";
-        } else if (event.error === "no-speech") {
-          friendlyError = "No speech detected. Please try again.";
-        }
-      }
+      const friendlyError = event.error || "speech-error";
 
       setError(friendlyError);
 
@@ -248,7 +236,6 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
     };
 
     recognition.onend = () => {
-      console.log("[speech] recognition ended");
 
       isStartingRef.current = false;
       isListeningRef.current = false;
@@ -263,7 +250,6 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
         clearResolveTimer();
         resolveTimerRef.current = setTimeout(() => {
           const clean = cleanTranscript(transcriptRef.current);
-          console.log("[speech] manual stop resolved");
           resolveStop(clean);
         }, STOP_RESOLVE_DEBOUNCE_MS);
       }
@@ -273,8 +259,7 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
 
         if (silenceMs > SILENCE_TIMEOUT_MS) {
           shouldKeepListeningRef.current = false;
-          setError("No speech detected for more than 3 seconds. Listening stopped.");
-          console.log("[speech] silence timeout reached, stopping");
+          setError("silence-timeout");
           return;
         }
 
@@ -287,8 +272,7 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
         restartAttemptsRef.current += 1;
         if (restartAttemptsRef.current > MAX_RESTARTS_IN_WINDOW) {
           shouldKeepListeningRef.current = false;
-          setError("Speech recognition is unstable right now. Please tap to retry.");
-          console.log("[speech] restart guard tripped, stopping");
+          setError("unstable");
           return;
         }
 
@@ -305,7 +289,6 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
 
           try {
             isStartingRef.current = true;
-            console.log("[speech] restarting recognition after short pause");
             recognitionRef.current.start();
           } catch (restartError) {
             isStartingRef.current = false;
@@ -337,7 +320,6 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
     }
 
     try {
-      console.log("[speech] manual start requested");
       clearRestartTimer();
       clearResolveTimer();
       shouldKeepListeningRef.current = true;
@@ -355,7 +337,6 @@ export const useSpeechToText = ({ lang = "en-US", continuous = true, interimResu
   }, [clearRestartTimer, clearResolveTimer]);
 
   const stopListening = useCallback(() => {
-    console.log("[speech] manual stop requested");
     shouldKeepListeningRef.current = false;
     manualStopRef.current = true;
     clearRestartTimer();

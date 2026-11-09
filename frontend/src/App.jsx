@@ -1,689 +1,589 @@
-import { Loader2, Mic, Square, Terminal } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { sendChat } from "./api/chatClient";
-import { useSpeechToText } from "./hooks/useSpeechToText";
-import { useTextToSpeech } from "./hooks/useTextToSpeech";
+import { ArrowUp, Check, CircleHelp, Copy, Download, Menu, Mic, Settings2, Square, Volume2, X } from "lucide-react";
 import { AgentAudioVisualizerAura } from "./components/agent-audio-visualizer-aura";
+import { Markdown } from "./components/Markdown";
+import { Sidebar } from "./components/Sidebar";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { HelpDialog } from "./components/HelpDialog";
+import { useSpeechToText } from "./hooks/useSpeechToText";
+import { useSpeechQueue } from "./hooks/useSpeechQueue";
+import { useConversations, useSettings } from "./hooks/useStoredState";
+import { streamChat } from "./lib/chatStream";
+import { createSentenceSplitter, makeTitle, newId } from "./lib/text";
 
-/**
- * Normalize and clean transcript text
- * Removes duplicate/repeated words and excessive whitespace
- */
-const normalizeTranscriptWords = (input) => {
-  const words = input
-    .split(/\s+/)
-    .map((word) => word.trim())
-    .filter(Boolean);
+const PAUSE_TO_SEND_MS = 1300;
 
-  const normalized = [];
-  let repeatCount = 0;
-  let previous = "";
-
-  for (const word of words) {
-    const lowered = word.toLowerCase();
-
-    if (lowered === previous) {
-      repeatCount += 1;
-      if (repeatCount > 2) {
-        continue;
-      }
-    } else {
-      previous = lowered;
-      repeatCount = 1;
-    }
-
-    normalized.push(word);
-  }
-
-  return normalized;
+const STATUS = {
+  idle: { label: "Ready", tone: "idle" },
+  listening: { label: "Listening", tone: "listen" },
+  thinking: { label: "Thinking", tone: "think" },
+  replying: { label: "Replying", tone: "speak" },
+  speaking: { label: "Speaking", tone: "speak" }
 };
 
-/**
- * Clean transcript text before sending to backend
- * - Removes extra whitespace
- * - Removes duplicate repeated words (up to 3 occurrences)
- * - Ensures single spaces between words
- */
-const cleanTranscriptForBackend = (text) => {
-  if (!text || !text.trim()) {
-    return "";
-  }
-
-  // Normalize to remove extra whitespace first
-  let cleaned = text.trim().replace(/\s+/g, " ");
-
-  // Remove excessive repetition of the same word
-  const words = cleaned.split(" ");
-  const deduplicated = [];
-  let lastWord = "";
-  let repeatCount = 0;
-
-  for (const word of words) {
-    const lowered = word.toLowerCase();
-    
-    if (lowered === lastWord.toLowerCase()) {
-      repeatCount += 1;
-      // Allow up to 2 repetitions (3 total occurrences)
-      if (repeatCount <= 2) {
-        deduplicated.push(word);
-      }
-    } else {
-      deduplicated.push(word);
-      lastWord = word;
-      repeatCount = 0;
-    }
-  }
-
-  return deduplicated.join(" ").trim();
+// Orb colour follows what Aura is doing.
+const ORB = {
+  idle: { state: "idle", color: "#8F86FF", shift: 0.3 },
+  listening: { state: "listening", color: "#5EF2D6", shift: 0.15 },
+  thinking: { state: "thinking", color: "#9B7BFF", shift: 0.25 },
+  replying: { state: "speaking", color: "#7FD8FF", shift: 0.45 },
+  speaking: { state: "speaking", color: "#7FD8FF", shift: 0.45 }
 };
 
-const App = () => {
-  const [isLoaded, setIsLoaded] = useState(false);
-  const [loadProgress, setLoadProgress] = useState(0);
-  const [sessionId, setSessionId] = useState("");
+const SUGGESTIONS = [
+  "Help me plan a calm, productive morning",
+  "Explain how solar panels work, simply",
+  "Give me three dinner ideas with paneer",
+  "Quiz me on world capitals"
+];
+
+const speechErrorMessage = (code) => {
+  if (!code || code === "aborted") return null;
+  if (code === "not-allowed" || code === "service-not-allowed") {
+    return { tone: "error", text: "Microphone access is blocked. Allow the microphone for this site in your browser, then tap the mic again." };
+  }
+  if (code === "audio-capture") return { tone: "error", text: "No microphone was found. Check that one is connected and allowed." };
+  if (code === "network") return { tone: "error", text: "Voice recognition needs an internet connection. Check your connection, or type instead." };
+  if (code === "silence-timeout" || code === "no-speech") {
+    return { tone: "info", text: "I didn't hear anything, so I stopped listening. Tap the mic when you're ready." };
+  }
+  if (code === "unstable") return { tone: "error", text: "Voice recognition keeps stopping in this browser. Try typing instead." };
+  return { tone: "error", text: "Voice input stopped unexpectedly. Tap the mic to try again, or type instead." };
+};
+
+export default function App() {
+  const [settings, updateSettings] = useSettings();
+  const [conversations, setConversations] = useConversations();
+  const [activeId, setActiveId] = useState(() => conversations[0]?.id || null);
   const [status, setStatus] = useState("idle");
-  const [activeView, setActiveView] = useState("assistant");
-  const [userText, setUserText] = useState("");
-  const [assistantReply, setAssistantReply] = useState("");
-  const [apiError, setApiError] = useState("");
-  const [textFallback, setTextFallback] = useState("");
+  const [streamingText, setStreamingText] = useState("");
+  const [draft, setDraft] = useState("");
   const [toasts, setToasts] = useState([]);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [copiedId, setCopiedId] = useState(null);
+  const [failedTurn, setFailedTurn] = useState(null);
 
-  const isSendingRef = useRef(false);
-  const requestAbortRef = useRef(null);
-  const splashTimeoutRef = useRef(null);
-  const toastIdRef = useRef(0);
-  const toastTimeoutsRef = useRef(new Map());
-  const lastToastMessageRef = useRef({ speech: "", api: "", tts: "" });
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const abortRef = useRef(null);
+  const pauseTimerRef = useRef(null);
+  const sendingRef = useRef(false);
+  const inputRef = useRef(null);
+  const scrollRef = useRef(null);
 
-  const {
-    isSupported,
-    isListening,
-    transcript,
-    interimTranscript,
-    fullTranscript,
-    error: speechError,
-    startListening,
-    stopListening,
-    resetTranscript,
-    stopListeningAndGetTranscript
-  } = useSpeechToText({ lang: "en-US", continuous: true, interimResults: true });
+  const stt = useSpeechToText({ lang: settings.lang, continuous: true, interimResults: true });
+  const tts = useSpeechQueue({ voiceURI: settings.voiceURI, rate: settings.rate, lang: settings.lang });
+  const speakReplies = settings.speakReplies !== false && tts.isSupported;
 
-  const {
-    isSupported: isTtsSupported,
-    isSpeaking,
-    isSpeakingRef,
-    error: ttsError,
-    speak,
-    cancel
-  } = useTextToSpeech();
+  const active = conversations.find((c) => c.id === activeId) || null;
+  const messages = active?.messages || [];
+  const isEmpty = messages.length === 0 && !streamingText && status !== "thinking";
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setLoadProgress((previous) => {
-        if (previous >= 100) {
-          clearInterval(timer);
-          splashTimeoutRef.current = setTimeout(() => {
-            setIsLoaded(true);
-          }, 500);
-          return 100;
-        }
-
-        const increment = Math.random() * 15;
-        return Math.min(previous + increment, 100);
-      });
-    }, 150);
-
-    return () => {
-      clearInterval(timer);
-      if (splashTimeoutRef.current) {
-        clearTimeout(splashTimeoutRef.current);
-      }
-    };
+  // ---------- Toasts ----------
+  const notify = useCallback((text, tone = "error") => {
+    const id = newId();
+    setToasts((current) => [...current.filter((t) => t.text !== text), { id, text, tone }].slice(-3));
+    window.setTimeout(() => setToasts((current) => current.filter((t) => t.id !== id)), tone === "error" ? 7000 : 4500);
   }, []);
 
-  useEffect(() => {
-    const root = document.documentElement;
+  // ---------- Conversations ----------
+  const updateConversation = useCallback(
+    (id, update) => {
+      setConversations((current) =>
+        current
+          .map((c) => (c.id === id ? { ...update(c), updatedAt: Date.now() } : c))
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+      );
+    },
+    [setConversations]
+  );
 
-    const updateCursorGlow = (event) => {
-      root.style.setProperty("--cursor-x", `${event.clientX}px`);
-      root.style.setProperty("--cursor-y", `${event.clientY}px`);
-    };
-
-    const showCursorGlow = () => {
-      root.style.setProperty("--cursor-opacity", "1");
-    };
-
-    const hideCursorGlow = () => {
-      root.style.setProperty("--cursor-opacity", "0");
-    };
-
-    window.addEventListener("pointermove", updateCursorGlow, { passive: true });
-    window.addEventListener("pointerenter", showCursorGlow);
-    window.addEventListener("pointerleave", hideCursorGlow);
-
-    return () => {
-      window.removeEventListener("pointermove", updateCursorGlow);
-      window.removeEventListener("pointerenter", showCursorGlow);
-      window.removeEventListener("pointerleave", hideCursorGlow);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (isListening && status === "idle") {
-      setStatus("listening");
-    }
-  }, [isListening, status]);
-
-  useEffect(() => {
-    if (!isListening && status === "listening") {
-      setStatus("idle");
-    }
-  }, [isListening, status]);
-
-  useEffect(() => {
-    if (isSpeaking && status !== "speaking") {
-      setStatus("speaking");
-      return;
-    }
-
-    if (!isSpeaking && status === "speaking") {
-      setStatus(isListening ? "listening" : "idle");
-    }
-  }, [isSpeaking, isListening, status]);
-
-  useEffect(() => {
-    return () => {
-      toastTimeoutsRef.current.forEach((timeoutId) => {
-        clearTimeout(timeoutId);
-      });
-      toastTimeoutsRef.current.clear();
-    };
-  }, []);
-
-  const dismissToast = useCallback((toastId) => {
-    const timeoutId = toastTimeoutsRef.current.get(toastId);
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-      toastTimeoutsRef.current.delete(toastId);
-    }
-
-    setToasts((previous) => previous.filter((toast) => toast.id !== toastId));
-  }, []);
-
-  const showToast = useCallback((title, message) => {
-    toastIdRef.current += 1;
-    const id = toastIdRef.current;
-
-    setToasts((previous) => {
-      const next = [...previous, { id, title, message }];
-      return next.slice(-3);
-    });
-
-    const timeoutId = setTimeout(() => {
-      dismissToast(id);
-    }, 5000);
-
-    toastTimeoutsRef.current.set(id, timeoutId);
-  }, [dismissToast]);
-
-  const canSubmitText = useMemo(() => {
-    return (fullTranscript.trim().length > 0 || textFallback.trim().length > 0) && !isSendingRef.current;
-  }, [fullTranscript, textFallback]);
-
-  const transcriptWords = useMemo(() => {
-    const source = `${transcript} ${interimTranscript}`.trim();
-    return source ? normalizeTranscriptWords(source) : [];
-  }, [transcript, interimTranscript]);
-
-  const stopEverything = () => {
-    if (requestAbortRef.current) {
-      requestAbortRef.current.abort();
-      requestAbortRef.current = null;
-    }
-
-    stopListening();
-    cancel();
-    setApiError("");
+  const stopAll = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    window.clearTimeout(pauseTimerRef.current);
+    stt.stopListening();
+    stt.resetTranscript();
+    tts.stop();
     setStatus("idle");
+  }, [stt, tts]);
+
+  const startNewChat = () => {
+    stopAll();
+    setActiveId(null);
+    setStreamingText("");
+    setFailedTurn(null);
+    setSidebarOpen(false);
+    inputRef.current?.focus();
   };
 
-  const sendTurn = async (messageText) => {
-    // Clean the transcript before sending to backend
-    const message = cleanTranscriptForBackend(messageText);
-    
-    if (!message || isSendingRef.current) {
-      if (!message) {
-        setStatus("idle");
-      }
-      return;
+  const selectChat = (id) => {
+    stopAll();
+    setActiveId(id);
+    setStreamingText("");
+    setFailedTurn(null);
+    setSidebarOpen(false);
+  };
+
+  const deleteChat = (id) => {
+    if (id === activeId) {
+      stopAll();
+      setActiveId(null);
     }
+    setConversations((current) => current.filter((c) => c.id !== id));
+  };
 
-    resetTranscript();
-    setUserText(message);
-    isSendingRef.current = true;
-    setStatus("thinking");
-    setApiError("");
+  // ---------- Talking to the model ----------
+  const sendMessage = useCallback(
+    async (rawText, { viaVoice = false, retry = false } = {}) => {
+      const text = String(rawText || "").replace(/\s+/g, " ").trim();
+      if (!text || sendingRef.current) return;
+      sendingRef.current = true;
 
-    const abortController = new AbortController();
-    requestAbortRef.current = abortController;
+      window.clearTimeout(pauseTimerRef.current);
+      stt.stopListening();
+      stt.resetTranscript();
+      tts.stop();
+      setFailedTurn(null);
 
-    try {
-      const data = await sendChat({
-        sessionId: sessionId || undefined,
-        message,
-        signal: abortController.signal
-      });
+      // Find or create the conversation, and add the user's message.
+      let conversationId = activeId;
+      let history = active?.messages || [];
+      if (!conversationId) {
+        conversationId = newId();
+        const now = Date.now();
+        setConversations((current) => [{ id: conversationId, title: makeTitle(text), createdAt: now, updatedAt: now, messages: [] }, ...current]);
+        setActiveId(conversationId);
+        history = [];
+      }
+      if (!retry) {
+        const userMessage = { id: newId(), role: "user", content: text };
+        history = [...history, userMessage];
+        updateConversation(conversationId, (c) => ({ ...c, messages: [...c.messages, userMessage] }));
+      }
 
-      setSessionId(data.sessionId);
-      setAssistantReply(data.reply);
+      setStatus("thinking");
+      setStreamingText("");
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const splitter = createSentenceSplitter();
+      if (speakReplies) tts.begin();
 
-      if (isTtsSupported) {
-        setStatus("speaking");
-        const completed = await speak({ text: data.reply, lang: "en-US", rate: 1, pitch: 1.04 });
-        if (!completed) {
+      try {
+        const reply = await streamChat({
+          messages: history.map(({ role, content }) => ({ role, content })),
+          style: settings.style,
+          signal: controller.signal,
+          onText: (chunk, full) => {
+            if (statusRef.current === "thinking") setStatus("replying");
+            setStreamingText(full);
+            if (speakReplies) splitter.push(chunk).forEach(tts.enqueue);
+          }
+        });
+
+        const finalText = reply || "I'm not sure what to say to that. Could you put it another way?";
+        updateConversation(conversationId, (c) => ({
+          ...c,
+          messages: [...c.messages, { id: newId(), role: "assistant", content: finalText }]
+        }));
+        setStreamingText("");
+        abortRef.current = null;
+        sendingRef.current = false;
+
+        let finishedSpeaking = true;
+        if (statusRef.current === "thinking") setStatus("replying");
+        if (speakReplies) {
+          if (!reply) tts.enqueue(finalText);
+          splitter.flush().forEach(tts.enqueue);
+          setStatus("speaking");
+          finishedSpeaking = await tts.finish();
+        }
+        // Stopped, or the person started talking again, while Aura was speaking.
+        if (statusRef.current === "idle" || statusRef.current === "listening") return;
+
+        if (finishedSpeaking && viaVoice && settings.autoListen && stt.isSupported) {
+          stt.resetTranscript();
+          stt.startListening();
+          setStatus("listening");
+        } else {
           setStatus("idle");
-          setTextFallback("");
+        }
+      } catch (error) {
+        abortRef.current = null;
+        sendingRef.current = false;
+        setStreamingText("");
+        tts.stop();
+        if (error.name === "AbortError") {
+          setStatus((current) => (current === "listening" ? current : "idle"));
           return;
         }
-      }
-
-      if (speechError !== "network" && isSupported) {
-        resetTranscript();
-        setUserText("");
-        startListening();
-        setStatus("listening");
-      } else {
         setStatus("idle");
+        setFailedTurn({ conversationId, viaVoice });
+        notify(error.message || "Aura couldn't answer. Try again.");
       }
+    },
+    [active, activeId, notify, setConversations, settings.autoListen, settings.style, speakReplies, stt, tts, updateConversation]
+  );
 
-      setTextFallback("");
-    } catch (error) {
-      if (error.name === "AbortError") {
-        setStatus("idle");
+  const sendFromMic = useCallback(async () => {
+    window.clearTimeout(pauseTimerRef.current);
+    const heard = await stt.stopListeningAndGetTranscript();
+    const text = heard || stt.interimTranscript;
+    if (text.trim()) await sendMessage(text, { viaVoice: true });
+    else setStatus("idle");
+  }, [sendMessage, stt]);
+
+  const startListening = useCallback(() => {
+    if (!stt.isSupported) {
+      notify("Voice input isn't available in this browser. Type to Aura, or use Chrome, Edge or Safari to talk.", "info");
+      inputRef.current?.focus();
+      return;
+    }
+    abortRef.current?.abort();
+    tts.stop();
+    stt.resetTranscript();
+    stt.startListening();
+    setStatus("listening");
+  }, [notify, stt, tts]);
+
+  // The one big button: start, send, or cut in.
+  const onMicPress = () => {
+    if (status === "listening") {
+      void sendFromMic();
+      return;
+    }
+    startListening();
+  };
+
+  const retryLast = () => {
+    if (!failedTurn || !active) return;
+    const lastUser = [...active.messages].reverse().find((m) => m.role === "user");
+    if (lastUser) void sendMessage(lastUser.content, { viaVoice: failedTurn.viaVoice, retry: true });
+  };
+
+  // ---------- Voice side effects ----------
+  // Hands-free: send after a short pause in speech.
+  useEffect(() => {
+    if (status !== "listening" || !settings.handsFree) return undefined;
+    if (!stt.transcript.trim()) return undefined;
+    window.clearTimeout(pauseTimerRef.current);
+    pauseTimerRef.current = window.setTimeout(() => {
+      if (statusRef.current === "listening") void sendFromMic();
+    }, PAUSE_TO_SEND_MS);
+    return () => window.clearTimeout(pauseTimerRef.current);
+  }, [stt.transcript, stt.interimTranscript, status, settings.handsFree, sendFromMic]);
+
+  // If the browser stops listening on its own, go back to ready.
+  useEffect(() => {
+    if (!stt.isListening && status === "listening" && !sendingRef.current) {
+      const timer = window.setTimeout(() => {
+        if (statusRef.current === "listening" && !sendingRef.current) {
+          if (stt.transcript.trim() && settings.handsFree) void sendFromMic();
+          else setStatus("idle");
+        }
+      }, 400);
+      return () => window.clearTimeout(timer);
+    }
+    return undefined;
+  }, [stt.isListening, stt.transcript, status, settings.handsFree, sendFromMic]);
+
+  useEffect(() => {
+    const message = speechErrorMessage(stt.error);
+    if (message) notify(message.text, message.tone);
+  }, [stt.error, notify]);
+
+  useEffect(() => {
+    if (tts.error && tts.error !== "interrupted" && tts.error !== "canceled") {
+      notify("Aura couldn't read the reply aloud in this browser. You can still read it on screen.", "info");
+    }
+  }, [tts.error, notify]);
+
+  // ---------- Keyboard ----------
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const target = event.target;
+      const typing = target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+      if (event.key === "Escape") {
+        if (helpOpen) setHelpOpen(false);
+        else if (settingsOpen) setSettingsOpen(false);
+        else if (sidebarOpen) setSidebarOpen(false);
+        else stopAll();
         return;
       }
-
-      setStatus("error");
-      setApiError(error.message || "Failed to contact backend");
-    } finally {
-      if (requestAbortRef.current === abortController) {
-        requestAbortRef.current = null;
+      if (typing || helpOpen || settingsOpen) return;
+      if (event.key === "/") {
+        event.preventDefault();
+        inputRef.current?.focus();
+      } else if (event.code === "Space" && !(target instanceof HTMLButtonElement) && !event.repeat) {
+        event.preventDefault();
+        onMicPress();
       }
-      isSendingRef.current = false;
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
+  // Keep the latest message in view.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [messages.length, streamingText, status]);
+
+  // ---------- Message actions ----------
+  const copyMessage = async (message) => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedId(message.id);
+      window.setTimeout(() => setCopiedId(null), 1500);
+    } catch {
+      notify("Couldn't copy. Select the text and copy it instead.", "info");
     }
   };
 
-  const handleSendTranscript = async () => {
-    const spokenText = await stopListeningAndGetTranscript();
-    await sendTurn(spokenText);
+  const replayMessage = (message) => {
+    stt.stopListening();
+    setStatus("speaking");
+    void tts.speakAll(message.content).then(() => {
+      if (statusRef.current === "speaking") setStatus("idle");
+    });
   };
 
-  const handleManualSend = async () => {
-    const typedText = textFallback.trim();
-
-    if (typedText) {
-      await stopListeningAndGetTranscript();
-      await sendTurn(typedText);
-      return;
-    }
-
-    await handleSendTranscript();
+  const downloadChat = () => {
+    if (!active) return;
+    const lines = active.messages.map((m) => `${m.role === "user" ? "You" : "Aura"}: ${m.content}`);
+    const blob = new Blob([`${active.title}\n${new Date(active.createdAt).toLocaleString()}\n\n${lines.join("\n\n")}\n`], {
+      type: "text/plain"
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `aura-chat-${new Date(active.createdAt).toISOString().slice(0, 10)}.txt`;
+    a.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
-  const toggleConversation = async () => {
-    if (status === "speaking") {
-      // Allow barge-in: tapping mic interrupts TTS and immediately reopens listening.
-      cancel();
-      resetTranscript();
-      setUserText("");
-      setApiError("");
-      setStatus("listening");
-      startListening();
-      return;
-    }
-
-    if (status === "idle" || status === "error") {
-      resetTranscript();
-      setUserText("");
-      setApiError("");
-      setStatus("listening");
-      startListening();
-      return;
-    }
-
-    if (status === "listening") {
-      await handleSendTranscript();
-      return;
-    }
-
-    if (status === "thinking") {
-      return;
-    }
-
-    stopEverything();
+  const submitDraft = (event) => {
+    event?.preventDefault();
+    const text = draft.trim();
+    if (!text) return;
+    setDraft("");
+    void sendMessage(text);
   };
 
-  const isListeningState = status === "listening";
-  const isBusyState = status === "thinking";
-  const isInterruptableSpeaking = status === "speaking";
-  const showStopState = isListeningState;
-  const mainButtonLabel = isListeningState
-    ? "Stop and Send"
-    : isInterruptableSpeaking
-      ? "Tap to Interrupt"
-      : isBusyState
-        ? "Aura Working..."
-        : "Talk with Aura";
+  // ---------- View ----------
+  const liveWords = `${stt.transcript} ${stt.interimTranscript}`.trim();
+  const orb = ORB[status] || ORB.idle;
+  const statusInfo = STATUS[status] || STATUS.idle;
+  const micLabel =
+    status === "listening"
+      ? settings.handsFree
+        ? "Listening. Pause to send, or tap to send now"
+        : "Tap to send"
+      : status === "speaking" || status === "replying"
+        ? "Tap to cut in and talk"
+        : "Tap to talk";
 
-  useEffect(() => {
-    // If speech input appears while TTS is active, interrupt playback immediately.
-    if (!isSpeakingRef.current) {
-      return;
-    }
-
-    const spokenInput = `${transcript} ${interimTranscript}`.trim();
-    if (!spokenInput) {
-      return;
-    }
-
-    cancel();
-    setStatus("listening");
-  }, [transcript, interimTranscript, cancel, isSpeakingRef]);
-
-  const friendlySpeechError = useMemo(() => {
-    if (!speechError) {
-      return "";
-    }
-
-    const lowered = speechError.toLowerCase();
-
-    if (lowered.includes("not-allowed") || lowered.includes("service-not-allowed")) {
-      return "Microphone access is blocked. Please allow microphone permission and try again.";
-    }
-
-    if (lowered.includes("audio-capture")) {
-      return "I cannot hear your microphone right now. Check your audio device and browser permissions.";
-    }
-
-    if (lowered.includes("network")) {
-      return "Voice recognition lost network connection. Check your internet and try again.";
-    }
-
-    if (lowered.includes("5 seconds")) {
-      return "I didn’t catch anything. Tap to try again.";
-    }
-
-    return "Voice input ran into an issue. Please try again or use the manual prompt.";
-  }, [speechError]);
-
-  const friendlyApiError = useMemo(() => {
-    if (!apiError) {
-      return "";
-    }
-
-    const lowered = apiError.toLowerCase();
-
-    if (lowered.includes("rate limit") || lowered.includes("429")) {
-      return "Aura is receiving too many requests right now. Please wait a few seconds and try again.";
-    }
-
-    if (lowered.includes("model is loading") || lowered.includes("503")) {
-      return "Aura is warming up the model. Please retry in a moment.";
-    }
-
-    if (lowered.includes("authentication") || lowered.includes("api key") || lowered.includes("401") || lowered.includes("403")) {
-      return "Aura could not authenticate with the AI service. Please check backend API key settings.";
-    }
-
-    if (lowered.includes("failed to contact backend") || lowered.includes("fetch") || lowered.includes("network")) {
-      return "Cannot reach the Aura backend right now. Make sure the backend server is running.";
-    }
-
-    return "Something went wrong while getting Aura's response. Please try again.";
-  }, [apiError]);
-
-  const friendlyTtsError = useMemo(() => {
-    if (!ttsError) {
-      return "";
-    }
-
-    const lowered = ttsError.toLowerCase();
-
-    if (lowered.includes("not-allowed") || lowered.includes("not supported")) {
-      return "Voice playback is unavailable in this browser. Aura can still reply in text.";
-    }
-
-    return "Aura could not read the response out loud. You can still continue with text and voice input.";
-  }, [ttsError]);
-
-  useEffect(() => {
-    if (!friendlySpeechError || lastToastMessageRef.current.speech === friendlySpeechError) {
-      return;
-    }
-
-    lastToastMessageRef.current.speech = friendlySpeechError;
-    showToast("Voice Input", friendlySpeechError);
-  }, [friendlySpeechError, showToast]);
-
-  useEffect(() => {
-    if (!friendlyApiError || lastToastMessageRef.current.api === friendlyApiError) {
-      return;
-    }
-
-    lastToastMessageRef.current.api = friendlyApiError;
-    showToast("Assistant Reply", friendlyApiError);
-  }, [friendlyApiError, showToast]);
-
-  useEffect(() => {
-    if (!friendlyTtsError || lastToastMessageRef.current.tts === friendlyTtsError) {
-      return;
-    }
-
-    lastToastMessageRef.current.tts = friendlyTtsError;
-    showToast("Voice Output", friendlyTtsError);
-  }, [friendlyTtsError, showToast]);
-
-  const audioVisualizerState = useMemo(() => {
-    if (status === "speaking") {
-      return "speaking";
-    }
-
-    if (status === "thinking") {
-      return "thinking";
-    }
-
-    if (status === "listening") {
-      return "listening";
-    }
-
-    if (status === "error") {
-      return "connecting";
-    }
-
-    return "initializing";
-  }, [status]);
-
-  if (!isLoaded) {
-    return (
-      <div className="splash-screen" role="status" aria-live="polite" aria-label="Loading Aura">
-        <div className="splash-brand-wrap">
-          <div className="splash-glow" aria-hidden="true" />
-          <div className="splash-brand">
-            <div className="splash-icon">
-              <Mic size={20} />
-            </div>
-            <span className="splash-title">Aura AI</span>
-          </div>
-        </div>
-
-        <div className="splash-progress-track" aria-hidden="true">
-          <div className="splash-progress-fill" style={{ width: `${loadProgress}%` }} />
-        </div>
-
-        <div className="splash-caption">Initializing Engine v2.5</div>
-      </div>
-    );
-  }
+  const composerHint = useMemo(() => {
+    if (status === "listening") return settings.handsFree ? "Listening — pause when you're done" : "Listening — tap the mic to send";
+    if (status === "thinking") return "Thinking…";
+    if (status === "replying" || status === "speaking") return "Tap the mic to cut in";
+    return stt.isSupported ? "Tap the mic or press Space to talk" : "Type your message";
+  }, [status, settings.handsFree, stt.isSupported]);
 
   return (
-    <main className="aura-root">
-      <div className="grid-overlay" aria-hidden="true" />
+    <div className="app">
+      <Sidebar
+        conversations={conversations}
+        activeId={activeId}
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        onSelect={selectChat}
+        onNew={startNewChat}
+        onDelete={deleteChat}
+      />
 
-      <header className="top-nav">
-        <div className="engine-badge">
-          <span className="pulse-dot" />
-          Aura Agent
-        </div>
-        <div className="top-links">
-          <button
-            type="button"
-            className={`top-link-button ${activeView === "assistant" ? "active" : ""}`}
-            onClick={() => setActiveView("assistant")}
-          >
-            Aura Home
+      <div className="stage">
+        <header className="topbar">
+          <button type="button" className="icon-button menu-button" onClick={() => setSidebarOpen(true)} aria-label="Open chats">
+            <Menu size={20} />
           </button>
-          <button
-            type="button"
-            className={`top-link-button ${activeView === "docs" ? "active" : ""}`}
-            onClick={() => setActiveView("docs")}
-          >
-            Read Docs
-          </button>
-          <a href="https://github.com/Anandkanil/aura" target="_blank" rel="noopener noreferrer">GitHub</a>
-        </div>
-      </header>
-
-      {activeView === "assistant" ? (
-      <section className="hero-zone">
-        <h1>
-          Aura
-          <br />
-        </h1>
-
-        <div className="conversation-box">
-          {status === "listening" && <p className="listening-indicator">&quot;Listening...&quot;</p>}
-          {transcriptWords.length > 0 && (
-            <div className="transcript-stack">
-              <p className="user-line transcript-animated">
-                <span>You:</span>{" "}
-                {transcriptWords.map((word, index) => (
-                  <span key={`final-word-${index}`} className="transcript-word" style={{ animationDelay: `${index * 22}ms` }}>
-                    {word}
-                  </span>
-                ))}
-              </p>
-              <p className="transcript-caption">{isListening ? "Live transcription" : "Captured transcript"}</p>
-            </div>
-          )}
-          {assistantReply && <p className="assistant-line">{assistantReply}</p>}
-          {status === "thinking" && <Loader2 className="thinking-spinner" size={30} />}
-          {!userText && !assistantReply && status === "idle" && <p className="placeholder">Say hi to Aura whenever you are ready.</p>}
-        </div>
-
-        <section className="visualizer" aria-hidden="true">
-          <AgentAudioVisualizerAura
-            size="lg"
-            state={audioVisualizerState}
-            color="#42f5e6"
-            colorShift={0.1}
-            themeMode="dark"
-          />
-        </section>
-
-        <div className="action-row">
-          <button
-            className={`main-button ${isListeningState ? "listening" : ""}`}
-            onClick={toggleConversation}
-            disabled={(!isSupported && status === "idle") || isBusyState}
-          >
-            {showStopState ? (
-              <>
-                <Square size={14} fill="currentColor" /> {mainButtonLabel}
-              </>
-            ) : (
-              <>
-                <Mic size={14} /> {mainButtonLabel}
-              </>
-            )}
-            <span className="divider" />
-            <Terminal size={14} />
-          </button>
-        </div>
-
-        <div className="fallback-box">
-          <label htmlFor="fallback-input">Manual Prompt</label>
-          <textarea
-            id="fallback-input"
-            value={textFallback}
-            onChange={(event) => setTextFallback(event.target.value)}
-            placeholder="If voice input is unstable, type to Aura here in your own words."
-            rows={3}
-          />
-          <button className="send-button" onClick={handleManualSend} disabled={!canSubmitText}>
-            Send
-          </button>
-        </div>
-
-      </section>
-      ) : (
-      <section className="docs-zone">
-        <h1>Read Aura Docs</h1>
-        <p className="docs-subtitle">Everything you need to use Aura smoothly.</p>
-
-        <div className="docs-grid">
-          <article className="docs-card">
-            <h2>Quick Start</h2>
-            <p>Press <strong>Talk with Aura</strong> and start speaking naturally. Aura captures your voice and sends your turn automatically.</p>
-            <p>When Aura replies, it reads the response out loud and returns to listening mode.</p>
-          </article>
-
-          <article className="docs-card">
-            <h2>Controls</h2>
-            <p><strong>Talk with Aura:</strong> Start listening.</p>
-            <p><strong>Stop and Send:</strong> Stops recording and sends transcript immediately.</p>
-            <p><strong>Manual Prompt:</strong> Type and send text when voice input is unstable.</p>
-          </article>
-
-          <article className="docs-card">
-            <h2>Status Meanings</h2>
-            <p><strong>Listening:</strong> Aura is capturing your voice.</p>
-            <p><strong>Thinking:</strong> Aura is generating a response.</p>
-            <p><strong>Speaking:</strong> Aura is reading the response aloud.</p>
-            <p><strong>Error:</strong> A request or voice step failed.</p>
-          </article>
-
-          <article className="docs-card">
-            <h2>Troubleshooting</h2>
-            <p>Allow microphone permissions in your browser.</p>
-            <p>Make sure the backend server is running before sending prompts.</p>
-            <p>If voice playback is unavailable, continue via text in Manual Prompt.</p>
-          </article>
-        </div>
-      </section>
-      )}
-
-      <section className="toast-stack" aria-live="polite" aria-atomic="true">
-        {toasts.map((toast) => (
-          <article key={toast.id} className="toast-card" role="status">
-            <div className="toast-head">
-              <strong>{toast.title}</strong>
-              <button type="button" className="toast-close" onClick={() => dismissToast(toast.id)} aria-label="Dismiss notification">
-                Close
+          <div className="topbar-title">
+            <span className="wordmark topbar-wordmark" aria-hidden="true">aura</span>
+            {active && <span className="topbar-chat">{active.title}</span>}
+          </div>
+          <div className={`status-pill tone-${statusInfo.tone}`} role="status" aria-live="polite">
+            <span className="status-dot" />
+            {statusInfo.label}
+          </div>
+          <div className="topbar-actions">
+            {active && (
+              <button type="button" className="icon-button" onClick={downloadChat} aria-label="Download this chat" title="Download this chat">
+                <Download size={18} />
               </button>
-            </div>
-            <p>{toast.message}</p>
-          </article>
+            )}
+            <button type="button" className="icon-button" onClick={() => setHelpOpen(true)} aria-label="Help" title="Help">
+              <CircleHelp size={18} />
+            </button>
+            <button type="button" className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Settings" title="Settings">
+              <Settings2 size={18} />
+            </button>
+          </div>
+        </header>
+
+        <main className={`dialogue ${isEmpty ? "is-empty" : ""}`} ref={scrollRef}>
+          <div className={`orb-wrap ${isEmpty ? "orb-hero" : "orb-docked"}`}>
+            <AgentAudioVisualizerAura
+              size="lg"
+              state={orb.state}
+              color={orb.color}
+              colorShift={orb.shift}
+              themeMode="dark"
+              className="orb"
+            />
+          </div>
+
+          {isEmpty && (
+            <section className="welcome">
+              {status === "listening" ? (
+                <p className={`live-words ${liveWords ? "" : "is-waiting"}`}>{liveWords || "I'm listening…"}</p>
+              ) : (
+                <>
+                  <h1>Hi, I'm Aura.</h1>
+                  <p className="welcome-sub">
+                    {stt.isSupported ? "Tap the mic and talk to me, or type below." : "Type a message below to start. Voice works in Chrome, Edge and Safari."}
+                  </p>
+                  <div className="suggestions">
+                    {SUGGESTIONS.map((suggestion) => (
+                      <button key={suggestion} type="button" className="suggestion" onClick={() => void sendMessage(suggestion)}>
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </section>
+          )}
+
+          {!isEmpty && (
+            <ol className="messages" aria-label="Conversation">
+              {messages.map((message) =>
+                message.role === "user" ? (
+                  <li key={message.id} className="msg msg-user">
+                    <p>{message.content}</p>
+                  </li>
+                ) : (
+                  <li key={message.id} className="msg msg-aura">
+                    <Markdown text={message.content} />
+                    <div className="msg-actions">
+                      <button type="button" className="icon-button small" onClick={() => copyMessage(message)} aria-label="Copy reply" title="Copy">
+                        {copiedId === message.id ? <Check size={14} /> : <Copy size={14} />}
+                      </button>
+                      {tts.isSupported && (
+                        <button type="button" className="icon-button small" onClick={() => replayMessage(message)} aria-label="Read reply aloud" title="Read aloud">
+                          <Volume2 size={14} />
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                )
+              )}
+              {status === "thinking" && (
+                <li className="msg msg-aura is-thinking" aria-label="Aura is thinking">
+                  <span className="thinking-dots"><i /><i /><i /></span>
+                </li>
+              )}
+              {streamingText && (
+                <li className="msg msg-aura is-streaming">
+                  <Markdown text={streamingText} />
+                </li>
+              )}
+              {failedTurn && failedTurn.conversationId === activeId && status === "idle" && (
+                <li className="msg-retry">
+                  <span>Aura didn't answer that one.</span>
+                  <button type="button" className="ghost-button" onClick={retryLast}>
+                    Try again
+                  </button>
+                </li>
+              )}
+            </ol>
+          )}
+        </main>
+
+        <footer className="composer-wrap">
+          {!isEmpty && status === "listening" && (
+            <p className={`live-words docked ${liveWords ? "" : "is-waiting"}`} aria-live="polite">
+              {liveWords || "I'm listening…"}
+            </p>
+          )}
+          <form className="composer" onSubmit={submitDraft}>
+            <button
+              type="button"
+              className={`mic tone-${statusInfo.tone} ${stt.isSupported ? "" : "is-unavailable"}`}
+              onClick={onMicPress}
+              aria-label={micLabel}
+              title={micLabel}
+            >
+              {status === "listening" && !settings.handsFree ? <ArrowUp size={24} /> : <Mic size={24} />}
+            </button>
+            <label className="sr-only" htmlFor="composer-input">Message Aura</label>
+            <textarea
+              id="composer-input"
+              ref={inputRef}
+              value={draft}
+              rows={1}
+              placeholder="Message Aura"
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) submitDraft(event);
+              }}
+            />
+            {status === "thinking" || status === "replying" || status === "speaking" ? (
+              <button type="button" className="send stop" onClick={stopAll} aria-label="Stop" title="Stop">
+                <Square size={16} fill="currentColor" />
+              </button>
+            ) : (
+              <button type="submit" className="send" disabled={!draft.trim()} aria-label="Send message" title="Send">
+                <ArrowUp size={20} />
+              </button>
+            )}
+          </form>
+          <p className="composer-hint">{composerHint}</p>
+        </footer>
+      </div>
+
+      <SettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        settings={settings}
+        onChange={updateSettings}
+        voices={tts.voices}
+        onPreviewVoice={() => void tts.speakAll("Hi, I'm Aura. This is how I'll sound.")}
+        onClearAll={() => {
+          stopAll();
+          setConversations([]);
+          setActiveId(null);
+        }}
+        hasChats={conversations.length > 0}
+      />
+      <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} voiceSupported={stt.isSupported} />
+
+      <div className="toasts" aria-live="polite">
+        {toasts.map((toast) => (
+          <div key={toast.id} className={`toast tone-${toast.tone}`} role={toast.tone === "error" ? "alert" : "status"}>
+            <p>{toast.text}</p>
+            <button
+              type="button"
+              className="icon-button small"
+              onClick={() => setToasts((current) => current.filter((t) => t.id !== toast.id))}
+              aria-label="Dismiss"
+            >
+              <X size={14} />
+            </button>
+          </div>
         ))}
-      </section>
-
-      <footer className="status-footer">
-        <div>Status: {status}</div>
-        <div>Session: {sessionId || "new session"}</div>
-        <div>{isSpeaking ? "Speaking" : "Silent"}</div>
-      </footer>
-    </main>
+      </div>
+    </div>
   );
-};
-
-export default App;
+}
