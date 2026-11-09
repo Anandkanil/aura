@@ -195,6 +195,7 @@ export default async (req, context) => {
 
   // Report the most informative failure if every attempt fails.
   let worstStatus = 0;
+  const tried = [];
   const remember = (status) => {
     const rank = (code) => ({ 402: 3, 401: 2, 403: 2, 429: 1 })[code] || 0;
     if (!worstStatus || rank(status) > rank(worstStatus)) worstStatus = status;
@@ -214,6 +215,7 @@ export default async (req, context) => {
 
       if (!upstream.ok || !upstream.body) {
         remember(upstream.status);
+        tried.push(`${attempt.provider}/${attempt.model}: ${upstream.status}`);
         const detail = await upstream.text().catch(() => '');
         console.error('Model failed', attempt.provider, attempt.model, upstream.status, detail.slice(0, 300));
         if (shouldTryNextModel(upstream.status)) continue;
@@ -230,9 +232,11 @@ export default async (req, context) => {
     } catch (err) {
       clearTimeout(timer);
       remember(504);
+      tried.push(`${attempt.provider}/${attempt.model}: ${err?.name === 'AbortError' ? 'timeout' : 'network error'}`);
       console.error('Model request failed', attempt.provider, attempt.model, err?.name, err?.message);
     }
   }
 
-  return json(503, { error: friendlyUpstreamError(worstStatus) });
+  // `tried` lists provider/model and status only (never keys), to help debugging.
+  return json(503, { error: friendlyUpstreamError(worstStatus), tried });
 };
